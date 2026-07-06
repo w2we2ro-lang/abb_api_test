@@ -103,34 +103,163 @@ DEFAULT_SHORTEST_PATH_REQUEST = {
     ],
 }
 
+VESSEL_SAMPLE_VOYAGE = {
+    "ports": [
+        {
+            "type": "Feature",
+            "properties": None,
+            "geometry": {"type": "Point", "coordinates": [8.577543, 53.535847]},
+        },
+        {"portId": "NLRTM-2745"},
+    ],
+}
+
+VESSEL_SAMPLE_PARAMETERS = {
+    "vesselName": "Sample Vessel",
+    "imo": "8814275",
+    "vesselType": "DryBulkCarrier",
+    "cargo": {
+        "loadCondition": "Loaded",
+        "loadState": "Packaged",
+        "dangerousCargo": ["DangerousGoods"],
+    },
+    "measurements": {
+        "lengthOverall": 100,
+        "beam": 20,
+        "draft": {"aft": 10, "fore": 10},
+        "airDraft": 10,
+        "grossTonnage": 100000,
+        "deadweight": 250000,
+    },
+    "fuelCurve": {
+        "values": [
+            {"speed": 8, "fuelUsage": 2.6},
+            {"speed": 12, "fuelUsage": 9.2},
+        ],
+    },
+    "otherFuelConsumption": {
+        "values": [
+            {"speedFrom": 0, "speedTo": 12, "otherFuel": 1},
+            {"speedFrom": 12, "speedTo": 50, "otherFuel": 2.5},
+        ],
+    },
+    "rpmCurve": {
+        "values": [
+            {"speed": 0, "rpm": 0},
+            {"speed": 10, "rpm": 1000},
+        ],
+    },
+    "powerCurve": {
+        "values": [
+            {"speed": 0, "maxContinuousRating": 0},
+            {"speed": 10, "maxContinuousRating": 0.9},
+        ],
+    },
+    "customModel": None,
+    "safetyMargins": {"port": 0, "starboard": 0, "underKeel": 0, "air": 0, "aft": 0, "forward": 0},
+    "cii": {"yearToDateDistance": 10, "yearToDateCo2Emissions": 0},
+}
+
+VESSEL_SAMPLE_COSTS_AND_FUEL = {
+    "vesselCosts": 25000,
+    "nonEcaFuel": {
+        "mainEngineFuel": [{"consumptionCurveFactor": 1, "cost": 800, "emissionFactor": 3.114, "fuelType": "HFO"}],
+        "otherFuel": [{"consumptionCurveFactor": 1, "cost": 200, "emissionFactor": 3.114, "fuelType": "MGO"}],
+    },
+    "ecaFuel": {
+        "default": {
+            "mainEngineFuel": [{"consumptionCurveFactor": 1, "cost": 800, "emissionFactor": 3.206, "fuelType": "MGO"}],
+            "otherFuel": [{"consumptionCurveFactor": 1, "cost": 200, "emissionFactor": 3.206, "fuelType": "MGO"}],
+        }
+    },
+}
+
+VESSEL_SAMPLE_CONFIG = {
+    "hoursBetweenRouteWaypoints": 6,
+    "avoidCoastalAreas": True,
+    "followShortestNavigableRoute": False,
+    "groundingCheckMode": "Off",
+}
+
+VESSEL_SAMPLE_RESTRICTIONS = {
+    "northVertex": 80,
+    "southVertex": -80,
+    "conditionalAreas": {
+        "defaultAreas": ["SpeedLimit", "EmissionControl"],
+        "areaOverrides": [{"enabled": True, "areaId": "nogo-4"}],
+    },
+    "weatherLimits": [
+        {
+            "name": "HurricaneDistance",
+            "minimum": 500,
+            "action": {"actionType": "Warn", "warningSeverity": "Moderate"},
+        }
+    ],
+}
+
+VESSEL_SAMPLE_WEATHER_SOURCE = {"type": "Forecast", "version": "2026-07-06T00:00:00Z"}
+
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
     "Instructed set speed": {
         "type": "InstructedSetSpeed",
         "id": "instructed-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
-        "speed": {"value": 12.5, "unit": "kn"},
+        "voyage": VESSEL_SAMPLE_VOYAGE,
+        "etd": "2026-07-06T19:20:30Z",
+        "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
+        "costs": None,
+        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
+        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
+        "config": VESSEL_SAMPLE_CONFIG,
+        "speed": 10,
+        "optimizationType": "Fuel",
     },
     "Recommended set speed": {
         "type": "RecommendedSetSpeed",
         "id": "recommended-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
-        "minimumSpeed": {"value": 10.0, "unit": "kn"},
-        "maximumSpeed": {"value": 16.0, "unit": "kn"},
+        "voyage": VESSEL_SAMPLE_VOYAGE,
+        "etd": "2026-07-06T19:20:30Z",
+        "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
+        "costs": None,
+        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
+        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
+        "config": VESSEL_SAMPLE_CONFIG,
+        "speeds": [{"minimum": 8, "maximum": 12}],
+        "optimizationType": "Fuel",
+        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Fixed ETA": {
         "type": "FixedETA",
         "id": "fixed-eta-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
+        "voyage": VESSEL_SAMPLE_VOYAGE,
+        "etd": "2026-07-06T19:20:30Z",
         "eta": "2026-07-12T12:00:00Z",
+        "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
+        "costs": None,
+        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
+        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
+        "config": VESSEL_SAMPLE_CONFIG,
+        "speeds": [{"minimum": 8, "maximum": 12}],
+        "optimizationType": "Fuel",
+        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Optimal set speed": {
         "type": "OptimalSetSpeed",
         "id": "optimal-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
-        "minimumSpeed": {"value": 10.0, "unit": "kn"},
-        "maximumSpeed": {"value": 16.0, "unit": "kn"},
-        "optimizationGoal": "FuelConsumption",
+        "voyage": VESSEL_SAMPLE_VOYAGE,
+        "etd": "2026-07-06T19:20:30Z",
+        "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
+        "costs": None,
+        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
+        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
+        "config": {**VESSEL_SAMPLE_CONFIG, "minimumHoursBetweenSpeedChanges": 24},
+        "speeds": [{"minimum": 8, "maximum": 12}],
+        "optimizationType": "Time",
+        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
 }
 
