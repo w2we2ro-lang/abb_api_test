@@ -526,6 +526,25 @@ class LogMixin:
         if rate_headers:
             self.log(f"Rate limit: {json.dumps(rate_headers)}")
 
+    def _token_headers(self) -> Dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+    def _raise_for_token_response(self, resp: requests.Response) -> None:
+        if resp.ok:
+            return
+        content_type = resp.headers.get("Content-Type", "")
+        self.log(f"Token error Content-Type: {content_type or 'unknown'}")
+        try:
+            self.log("Token error response body:")
+            self.log(json.dumps(resp.json(), indent=2)[:20000])
+        except Exception:
+            body = resp.text.strip()
+            self.log(body[:20000] if body else "<empty response body>")
+        resp.raise_for_status()
+
     def save_log(self) -> None:
         path = filedialog.asksaveasfilename(
             title="Save Log",
@@ -674,9 +693,9 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 if not data["client_id"] or not data["client_secret"]:
                     raise ValueError("Client ID and Client Secret are required.")
                 self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
                 self.log(f"Token response HTTP {resp.status_code}")
-                resp.raise_for_status()
+                self._raise_for_token_response(resp)
                 body = resp.json()
                 self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
@@ -867,10 +886,10 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
                 if not data["client_id"] or not data["client_secret"]:
                     raise ValueError("Client ID and Client Secret are required.")
                 self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
                 self.log(f"Token response HTTP {resp.status_code}")
                 self._log_rate_limit_headers(resp)
-                resp.raise_for_status()
+                self._raise_for_token_response(resp)
                 body = resp.json()
                 self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
@@ -1083,9 +1102,9 @@ class ProductApiFrame(ttk.Frame, LogMixin):
                 if not data["client_id"] or not data["client_secret"]:
                     raise ValueError("Client ID and Client Secret are required.")
                 self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
                 self.log(f"Token response HTTP {resp.status_code}")
-                resp.raise_for_status()
+                self._raise_for_token_response(resp)
                 body = resp.json()
                 self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
@@ -1278,9 +1297,9 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
                 if not data["client_id"] or not data["client_secret"]:
                     raise ValueError("Client ID and Client Secret are required.")
                 self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
                 self.log(f"Token response HTTP {resp.status_code}")
-                resp.raise_for_status()
+                self._raise_for_token_response(resp)
                 body = resp.json()
                 self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
@@ -1351,9 +1370,9 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         }
         if not data["client_id"] or not data["client_secret"]:
             return
-        resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+        resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
         self.log(f"Token refresh HTTP {resp.status_code}")
-        resp.raise_for_status()
+        self._raise_for_token_response(resp)
         body = resp.json()
         self._remember_auth(data, body)
 
