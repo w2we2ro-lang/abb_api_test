@@ -103,6 +103,37 @@ DEFAULT_SHORTEST_PATH_REQUEST = {
     ],
 }
 
+VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
+    "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
+    "Instructed set speed": {
+        "type": "InstructedSetSpeed",
+        "id": "instructed-speed-1",
+        "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
+        "speed": {"value": 12.5, "unit": "kn"},
+    },
+    "Recommended set speed": {
+        "type": "RecommendedSetSpeed",
+        "id": "recommended-speed-1",
+        "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
+        "minimumSpeed": {"value": 10.0, "unit": "kn"},
+        "maximumSpeed": {"value": 16.0, "unit": "kn"},
+    },
+    "Fixed ETA": {
+        "type": "FixedETA",
+        "id": "fixed-eta-1",
+        "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
+        "eta": "2026-07-12T12:00:00Z",
+    },
+    "Optimal set speed": {
+        "type": "OptimalSetSpeed",
+        "id": "optimal-speed-1",
+        "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
+        "minimumSpeed": {"value": 10.0, "unit": "kn"},
+        "maximumSpeed": {"value": 16.0, "unit": "kn"},
+        "optimizationGoal": "FuelConsumption",
+    },
+}
+
 VOYAGE_ENDPOINTS = {
     "Create Route Calculation Schedule": {
         "method": "POST",
@@ -135,6 +166,38 @@ VOYAGE_ENDPOINTS = {
         "method": "POST",
         "path": "/voyage/configuration/v1/route-comparison",
         "body": "route_comparison",
+    },
+}
+
+VOYAGE_FIELD_SAMPLES: Dict[str, Dict[str, str]] = {
+    "Create Route Calculation Schedule": {
+        "imo": "9876543",
+        "from": "2026-07-06T00:00:00Z",
+        "to": "2026-07-13T00:00:00Z",
+        "status": "Active",
+        "customerReferenceId": "123456789",
+    },
+    "Get Route Calculation Schedule": {
+        "routeCalculationScheduleId": "route-schedule-123",
+        "revision": "1",
+    },
+    "Update Route Calculation Schedule": {
+        "routeCalculationScheduleId": "route-schedule-123",
+        "revision": "1",
+    },
+    "Search Route Calculation Schedules": {
+        "imo": "9876543",
+        "from": "2026-07-06T00:00:00Z",
+        "to": "2026-07-13T00:00:00Z",
+        "status": "Active",
+        "customerReferenceId": "123456789",
+        "routeCalculationScheduleId": "route-schedule-123",
+    },
+    "Create Route Advice Report": {
+        "customerReferenceId": "123456789",
+    },
+    "Create Route Comparison Report": {
+        "customerReferenceId": "123456789",
     },
 }
 
@@ -227,6 +290,32 @@ PRODUCT_ENDPOINTS = {
             "voyageInfoId",
             "routeCalculationScheduleId",
         ],
+    },
+}
+
+PRODUCT_FIELD_SAMPLES: Dict[str, Dict[str, str]] = {
+    "Get Product Status": {
+        "correlationId": "K4w-THf4DoEERsg=",
+    },
+    "Download Product": {
+        "correlationId": "K4w-THf4DoEERsg=",
+        "filename": "RouteAdvice.pdf",
+        "productUrl": "https://dev.api.voyageoptimization.abb.com/voyage/products/v1/reports/K4w-THf4DoEERsg=/RouteAdvice.pdf",
+    },
+    "Get Last Sent Product": {
+        "imo": "9876543",
+        "productName": "RouteAdvice",
+        "customerReferenceId": "123456789",
+    },
+    "Search Products": {
+        "imo": "9876543",
+        "from": "2026-07-06T00:00:00Z",
+        "to": "2026-07-13T00:00:00Z",
+        "productName": "RouteAdvice",
+        "status": "All",
+        "customerReferenceId": "123456789",
+        "voyageInfoId": "ABC-123",
+        "routeCalculationScheduleId": "route-schedule-123",
     },
 }
 
@@ -401,7 +490,9 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         async_frame = ttk.LabelFrame(left, text="Asynchronous API Test")
         async_frame.pack(fill=tk.X, pady=(0, 8))
         self.async_endpoint_var = tk.StringVar(value="Shortest path")
-        ttk.Combobox(async_frame, textvariable=self.async_endpoint_var, values=list(VESSEL_ASYNC_ENDPOINTS.keys()), state="readonly", width=28).grid(row=0, column=0, padx=5, pady=5)
+        async_box = ttk.Combobox(async_frame, textvariable=self.async_endpoint_var, values=list(VESSEL_ASYNC_ENDPOINTS.keys()), state="readonly", width=28)
+        async_box.grid(row=0, column=0, padx=5, pady=5)
+        async_box.bind("<<ComboboxSelected>>", lambda _event: self.load_async_sample())
         ttk.Button(async_frame, text="Send WebSocket Request", command=self.send_ws_request).grid(row=0, column=1, padx=5, pady=5)
         ttk.Label(async_frame, text="Client ID for WS response routing").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.ws_client_id_var = tk.StringVar(value="test-client-001")
@@ -425,11 +516,12 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom, text="Load JSON", command=self.load_json_preset).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom, text="Save JSON", command=self.save_json_preset).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bottom, text="Load Sample ShortestPath", command=self.load_sample_shortest_path).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom, text="Load Async Sample", command=self.load_async_sample).pack(side=tk.LEFT, padx=5)
 
-    def load_sample_shortest_path(self) -> None:
+    def load_async_sample(self) -> None:
+        sample = VESSEL_ASYNC_SAMPLES.get(self.async_endpoint_var.get(), DEFAULT_SHORTEST_PATH_REQUEST)
         self.request_text.delete("1.0", tk.END)
-        self.request_text.insert("1.0", json.dumps(DEFAULT_SHORTEST_PATH_REQUEST, indent=2))
+        self.request_text.insert("1.0", json.dumps(sample, indent=2))
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._require_token()}", "Accept": "application/json"}
@@ -684,11 +776,29 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         threading.Thread(target=worker, daemon=True).start()
 
     def load_sample(self) -> None:
-        endpoint = VOYAGE_ENDPOINTS[self.endpoint_var.get()]
+        endpoint_name = self.endpoint_var.get()
+        self._load_field_sample(endpoint_name)
+        endpoint = VOYAGE_ENDPOINTS[endpoint_name]
         sample_key = endpoint.get("body")
         self.request_text.delete("1.0", tk.END)
         if sample_key:
             self.request_text.insert("1.0", json.dumps(VOYAGE_SAMPLES[sample_key], indent=2))
+
+    def _load_field_sample(self, endpoint_name: str) -> None:
+        sample = VOYAGE_FIELD_SAMPLES.get(endpoint_name, {})
+        fields = {
+            "routeCalculationScheduleId": self.schedule_id_var,
+            "revision": self.revision_var,
+            "imo": self.imo_var,
+            "from": self.from_var,
+            "to": self.to_var,
+            "status": self.status_var,
+            "customerReferenceId": self.customer_ref_var,
+            "searchRouteCalculationScheduleId": self.search_schedule_id_var,
+        }
+        for key, var in fields.items():
+            source_key = "routeCalculationScheduleId" if key == "searchRouteCalculationScheduleId" else key
+            var.set(sample.get(source_key, ""))
 
     def _build_path(self, endpoint: Dict[str, Any]) -> str:
         path = endpoint["path"]
@@ -772,8 +882,11 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         controls = ttk.LabelFrame(self, text="Request")
         controls.pack(fill=tk.X, pady=(0, 8))
         self.endpoint_var = tk.StringVar(value="Get Product Status")
-        ttk.Combobox(controls, textvariable=self.endpoint_var, values=list(PRODUCT_ENDPOINTS.keys()), state="readonly", width=32).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        endpoint_box = ttk.Combobox(controls, textvariable=self.endpoint_var, values=list(PRODUCT_ENDPOINTS.keys()), state="readonly", width=32)
+        endpoint_box.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        endpoint_box.bind("<<ComboboxSelected>>", lambda _event: self.load_sample())
         ttk.Button(controls, text="Send Request", command=self.send_request).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(controls, text="Load Sample", command=self.load_sample).grid(row=0, column=2, padx=5, pady=5)
 
         self.correlation_id_var = tk.StringVar()
         self.filename_var = tk.StringVar(value="RouteAdvice.pdf")
@@ -827,6 +940,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
         ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
+        self.load_sample()
 
     def get_token(self) -> None:
         def worker() -> None:
@@ -871,6 +985,24 @@ class ProductApiFrame(ttk.Frame, LogMixin):
                 messagebox.showerror("Product API Error", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def load_sample(self) -> None:
+        sample = PRODUCT_FIELD_SAMPLES.get(self.endpoint_var.get(), {})
+        fields = {
+            "correlationId": self.correlation_id_var,
+            "filename": self.filename_var,
+            "imo": self.imo_var,
+            "from": self.from_var,
+            "to": self.to_var,
+            "productName": self.product_name_var,
+            "status": self.status_var,
+            "customerReferenceId": self.customer_ref_var,
+            "voyageInfoId": self.voyage_info_id_var,
+            "routeCalculationScheduleId": self.route_schedule_id_var,
+            "productUrl": self.product_url_var,
+        }
+        for key, var in fields.items():
+            var.set(sample.get(key, ""))
 
     def download_product_url(self) -> None:
         def worker() -> None:
