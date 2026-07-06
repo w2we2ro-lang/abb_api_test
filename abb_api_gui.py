@@ -18,13 +18,17 @@ import queue
 import threading
 import time
 import tkinter as tk
-import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import websocket
+
+try:
+    import tkintermapview
+except ImportError:
+    tkintermapview = None
 
 
 TOKEN_URL = "https://internal.identity.genix.abilityplatform.abb/public/api/oauth2/token"
@@ -1112,27 +1116,47 @@ class MapPreviewFrame(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        controls = ttk.LabelFrame(self, text="Google Maps Preview")
+        controls = ttk.LabelFrame(self, text="Embedded Satellite Map Preview")
         controls.pack(fill=tk.X, pady=(0, 8))
 
-        self.api_key_var = tk.StringVar()
-        ttk.Label(controls, text="Google Maps API Key").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(controls, textvariable=self.api_key_var, show="*", width=42).grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        ttk.Label(controls, text="Provider").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(controls, text="Esri World Imagery in app (no API key)").grid(row=0, column=1, sticky="w", padx=5, pady=5)
         ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=2, padx=5, pady=5)
         ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=3, padx=5, pady=5)
-        ttk.Button(controls, text="Open Map Preview", command=self.open_map_preview).grid(row=0, column=4, padx=5, pady=5)
+        ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=4, padx=5, pady=5)
         controls.columnconfigure(1, weight=1)
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.pack(fill=tk.BOTH, expand=True)
 
         source_frame = ttk.LabelFrame(main, text="Map Source JSON")
-        result_frame = ttk.LabelFrame(main, text="Extracted Map Data / Log")
+        right_frame = ttk.Frame(main)
         main.add(source_frame, weight=2)
-        main.add(result_frame, weight=1)
+        main.add(right_frame, weight=3)
 
         self.source_text = scrolledtext.ScrolledText(source_frame, wrap=tk.NONE)
         self.source_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        map_frame = ttk.LabelFrame(right_frame, text="Satellite Map")
+        map_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        self.map_widget = None
+        if tkintermapview is None:
+            ttk.Label(
+                map_frame,
+                text="Install tkintermapview from requirements_abb_gui.txt to show the embedded map.",
+            ).pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        else:
+            self.map_widget = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
+            self.map_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            self.map_widget.set_tile_server(
+                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                max_zoom=19,
+            )
+            self.map_widget.set_position(29.7262421, -95.2641144)
+            self.map_widget.set_zoom(3)
+
+        result_frame = ttk.LabelFrame(right_frame, text="Extracted Map Data / Log")
+        result_frame.pack(fill=tk.BOTH, expand=False)
         self.result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.NONE)
         self.result_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -1160,19 +1184,15 @@ class MapPreviewFrame(ttk.Frame):
         raw = json.dumps(frame.latest_response_data, indent=2)
         self._set_source(raw, "Loaded last JSON response from active API tab.")
 
-    def open_map_preview(self) -> None:
+    def show_map_preview(self) -> None:
         try:
             data = json.loads(self.source_text.get("1.0", tk.END).strip())
             points, lines = self._extract_map_data(data)
             if not points and not lines:
                 raise ValueError("No longitude/latitude coordinates were found.")
-            html = self._build_google_maps_html(points, lines, self.api_key_var.get().strip())
-            path = Path.cwd() / "abb_map_preview.html"
-            path.write_text(html, encoding="utf-8")
+            self._render_embedded_map(points, lines)
             self._log(f"Points: {len(points)}")
             self._log(f"Lines: {len(lines)}")
-            self._log(f"Map preview written: {path}")
-            webbrowser.open(path.resolve().as_uri())
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("Map Preview Error", str(exc))
@@ -1263,71 +1283,43 @@ class MapPreviewFrame(ttk.Frame):
         visit(data)
         return points, lines
 
-    def _build_google_maps_html(
+    def _render_embedded_map(
         self,
         points: List[Dict[str, Any]],
         lines: List[List[Dict[str, float]]],
-        api_key: str,
-    ) -> str:
-        center = points[0] if points else lines[0][0]
-        map_data = json.dumps({"points": points, "lines": lines})
-        maps_query = f"?key={api_key}&callback=initMap" if api_key else "?callback=initMap"
-        no_key_message = (
-            "<p class='notice'>Google Maps API key is empty. Add a key in the GUI for full map rendering. "
-            "Coordinate links below still open in Google Maps.</p>"
-            if not api_key
-            else ""
-        )
-        links = "\n".join(
-            f"<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query={point['lat']},{point['lng']}'>"
-            f"{point.get('label', 'Point')} ({point['lat']:.6f}, {point['lng']:.6f})</a></li>"
-            for point in points[:50]
-        )
-        return f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>ABB API Map Preview</title>
-  <style>
-    html, body, #map {{ height: 100%; margin: 0; }}
-    #panel {{ position: absolute; top: 12px; left: 12px; max-width: 360px; max-height: 45vh; overflow: auto; background: white; padding: 12px; box-shadow: 0 2px 12px #777; font-family: Arial, sans-serif; z-index: 10; }}
-    .notice {{ color: #8a4b00; font-weight: 600; }}
-  </style>
-</head>
-<body>
-  <div id="panel">
-    <strong>ABB API Map Preview</strong>
-    {no_key_message}
-    <div>Points: {len(points)} / Lines: {len(lines)}</div>
-    <ul>{links}</ul>
-  </div>
-  <div id="map"></div>
-  <script>
-    const data = {map_data};
-    function initMap() {{
-      const map = new google.maps.Map(document.getElementById("map"), {{
-        zoom: 4,
-        center: {{lat: {center["lat"]}, lng: {center["lng"]}}},
-        mapTypeId: "terrain"
-      }});
-      const bounds = new google.maps.LatLngBounds();
-      data.points.forEach((point, index) => {{
-        const pos = {{lat: point.lat, lng: point.lng}};
-        new google.maps.Marker({{position: pos, map, label: String((index % 9) + 1), title: point.label || "Point"}});
-        bounds.extend(pos);
-      }});
-      data.lines.forEach((line) => {{
-        const path = line.map((point) => ({{lat: point.lat, lng: point.lng}}));
-        new google.maps.Polyline({{path, map, geodesic: true, strokeColor: "#0b57d0", strokeOpacity: 0.9, strokeWeight: 3}});
-        path.forEach((pos) => bounds.extend(pos));
-      }});
-      if (!bounds.isEmpty()) map.fitBounds(bounds);
-    }}
-  </script>
-  <script async defer src="https://maps.googleapis.com/maps/api/js{maps_query}"></script>
-</body>
-</html>
-"""
+    ) -> None:
+        if self.map_widget is None:
+            raise RuntimeError("tkintermapview is not installed. Install requirements_abb_gui.txt and restart the GUI.")
+
+        self.map_widget.delete_all_marker()
+        self.map_widget.delete_all_path()
+        positions: List[Tuple[float, float]] = []
+
+        for index, point in enumerate(points, start=1):
+            lat = point["lat"]
+            lng = point["lng"]
+            positions.append((lat, lng))
+            self.map_widget.set_marker(lat, lng, text=f"{index}. {point.get('label', 'Point')}")
+
+        for line in lines:
+            path = [(point["lat"], point["lng"]) for point in line]
+            if len(path) >= 2:
+                positions.extend(path)
+                self.map_widget.set_path(path, color="#00d4ff", width=3)
+
+        if positions:
+            self._fit_positions(positions)
+
+    def _fit_positions(self, positions: List[Tuple[float, float]]) -> None:
+        lats = [lat for lat, _lng in positions]
+        lngs = [lng for _lat, lng in positions]
+        center_lat = (min(lats) + max(lats)) / 2
+        center_lng = (min(lngs) + max(lngs)) / 2
+        try:
+            self.map_widget.fit_bounding_box((max(lats), min(lngs)), (min(lats), max(lngs)))
+        except Exception:
+            self.map_widget.set_position(center_lat, center_lng)
+            self.map_widget.set_zoom(4 if len(positions) > 1 else 9)
 
 
 class AbbApiGui(tk.Tk):
