@@ -18,9 +18,10 @@ import queue
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import websocket
@@ -287,7 +288,9 @@ class LogMixin:
 
     def _log_response(self, resp: requests.Response) -> None:
         try:
-            text = json.dumps(resp.json(), indent=2)
+            parsed = resp.json()
+            self.latest_response_data = parsed
+            text = json.dumps(parsed, indent=2)
         except Exception:
             text = resp.text
         self.log(text[:50000])
@@ -1103,12 +1106,237 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
             self.ws = None
 
 
+class MapPreviewFrame(ttk.Frame):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, padding=10)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        controls = ttk.LabelFrame(self, text="Google Maps Preview")
+        controls.pack(fill=tk.X, pady=(0, 8))
+
+        self.api_key_var = tk.StringVar()
+        ttk.Label(controls, text="Google Maps API Key").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(controls, textvariable=self.api_key_var, show="*", width=42).grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=3, padx=5, pady=5)
+        ttk.Button(controls, text="Open Map Preview", command=self.open_map_preview).grid(row=0, column=4, padx=5, pady=5)
+        controls.columnconfigure(1, weight=1)
+
+        main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        source_frame = ttk.LabelFrame(main, text="Map Source JSON")
+        result_frame = ttk.LabelFrame(main, text="Extracted Map Data / Log")
+        main.add(source_frame, weight=2)
+        main.add(result_frame, weight=1)
+
+        self.source_text = scrolledtext.ScrolledText(source_frame, wrap=tk.NONE)
+        self.source_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.NONE)
+        self.result_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(bottom, text="Clear", command=self.clear).pack(side=tk.LEFT)
+
+    def clear(self) -> None:
+        self.source_text.delete("1.0", tk.END)
+        self.result_text.delete("1.0", tk.END)
+
+    def load_active_request(self) -> None:
+        frame = self._active_api_frame()
+        if frame is None or not hasattr(frame, "request_text"):
+            messagebox.showinfo("Map Preview", "The last active API tab does not have request JSON.")
+            return
+        raw = frame.request_text.get("1.0", tk.END).strip()
+        self._set_source(raw, "Loaded request JSON from active API tab.")
+
+    def load_active_response(self) -> None:
+        frame = self._active_api_frame()
+        if frame is None or not hasattr(frame, "latest_response_data"):
+            messagebox.showinfo("Map Preview", "No parsed JSON response is available from the last active API tab.")
+            return
+        raw = json.dumps(frame.latest_response_data, indent=2)
+        self._set_source(raw, "Loaded last JSON response from active API tab.")
+
+    def open_map_preview(self) -> None:
+        try:
+            data = json.loads(self.source_text.get("1.0", tk.END).strip())
+            points, lines = self._extract_map_data(data)
+            if not points and not lines:
+                raise ValueError("No longitude/latitude coordinates were found.")
+            html = self._build_google_maps_html(points, lines, self.api_key_var.get().strip())
+            path = Path.cwd() / "abb_map_preview.html"
+            path.write_text(html, encoding="utf-8")
+            self._log(f"Points: {len(points)}")
+            self._log(f"Lines: {len(lines)}")
+            self._log(f"Map preview written: {path}")
+            webbrowser.open(path.resolve().as_uri())
+        except Exception as exc:
+            self._log(f"ERROR: {exc}")
+            messagebox.showerror("Map Preview Error", str(exc))
+
+    def _active_api_frame(self) -> Optional[tk.Misc]:
+        root = self.winfo_toplevel()
+        return getattr(root, "last_api_tab", None)
+
+    def _set_source(self, raw: str, message: str) -> None:
+        self.source_text.delete("1.0", tk.END)
+        self.source_text.insert("1.0", raw)
+        self._log(message)
+
+    def _log(self, message: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        self.result_text.insert(tk.END, f"[{ts}] {message}\n")
+        self.result_text.see(tk.END)
+
+    def _extract_map_data(self, data: Any) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, float]]]]:
+        points: List[Dict[str, Any]] = []
+        lines: List[List[Dict[str, float]]] = []
+        seen_points = set()
+        seen_lines = set()
+
+        def coord_pair(value: Any) -> Optional[Dict[str, float]]:
+            if not isinstance(value, list) or len(value) < 2:
+                return None
+            lon, lat = value[0], value[1]
+            if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+                return None
+            if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+                return None
+            return {"lat": float(lat), "lng": float(lon)}
+
+        def add_point(point: Dict[str, float], label: str) -> None:
+            key = (round(point["lat"], 7), round(point["lng"], 7), label)
+            if key not in seen_points:
+                seen_points.add(key)
+                points.append({**point, "label": label})
+
+        def add_line(raw_coords: Any) -> None:
+            line = [point for item in raw_coords if (point := coord_pair(item))]
+            if len(line) < 2:
+                return
+            key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in line)
+            if key not in seen_lines:
+                seen_lines.add(key)
+                lines.append(line)
+
+        def visit(obj: Any, label: str = "Point") -> None:
+            if isinstance(obj, dict):
+                geom = obj.get("geometry") if isinstance(obj.get("geometry"), dict) else obj
+                geom_type = geom.get("type") if isinstance(geom, dict) else None
+                coords = geom.get("coordinates") if isinstance(geom, dict) else None
+
+                if geom_type == "Point":
+                    point = coord_pair(coords)
+                    if point:
+                        props = obj.get("properties", {}) if isinstance(obj.get("properties"), dict) else {}
+                        add_point(point, str(props.get("name") or label))
+                elif geom_type == "LineString":
+                    add_line(coords)
+                elif geom_type in {"MultiLineString", "Polygon"} and isinstance(coords, list):
+                    for item in coords:
+                        add_line(item)
+                elif geom_type == "MultiPolygon" and isinstance(coords, list):
+                    for polygon in coords:
+                        for item in polygon:
+                            add_line(item)
+
+                if "longitude" in obj and "latitude" in obj:
+                    point = coord_pair([obj["longitude"], obj["latitude"]])
+                    if point:
+                        add_point(point, str(obj.get("name") or label))
+
+                for key, value in obj.items():
+                    visit(value, str(key))
+            elif isinstance(obj, list):
+                if len(obj) > 1 and all(coord_pair(item) for item in obj):
+                    add_line(obj)
+                else:
+                    point = coord_pair(obj)
+                    if point:
+                        add_point(point, label)
+                    for item in obj:
+                        visit(item, label)
+
+        visit(data)
+        return points, lines
+
+    def _build_google_maps_html(
+        self,
+        points: List[Dict[str, Any]],
+        lines: List[List[Dict[str, float]]],
+        api_key: str,
+    ) -> str:
+        center = points[0] if points else lines[0][0]
+        map_data = json.dumps({"points": points, "lines": lines})
+        maps_query = f"?key={api_key}&callback=initMap" if api_key else "?callback=initMap"
+        no_key_message = (
+            "<p class='notice'>Google Maps API key is empty. Add a key in the GUI for full map rendering. "
+            "Coordinate links below still open in Google Maps.</p>"
+            if not api_key
+            else ""
+        )
+        links = "\n".join(
+            f"<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query={point['lat']},{point['lng']}'>"
+            f"{point.get('label', 'Point')} ({point['lat']:.6f}, {point['lng']:.6f})</a></li>"
+            for point in points[:50]
+        )
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ABB API Map Preview</title>
+  <style>
+    html, body, #map {{ height: 100%; margin: 0; }}
+    #panel {{ position: absolute; top: 12px; left: 12px; max-width: 360px; max-height: 45vh; overflow: auto; background: white; padding: 12px; box-shadow: 0 2px 12px #777; font-family: Arial, sans-serif; z-index: 10; }}
+    .notice {{ color: #8a4b00; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <strong>ABB API Map Preview</strong>
+    {no_key_message}
+    <div>Points: {len(points)} / Lines: {len(lines)}</div>
+    <ul>{links}</ul>
+  </div>
+  <div id="map"></div>
+  <script>
+    const data = {map_data};
+    function initMap() {{
+      const map = new google.maps.Map(document.getElementById("map"), {{
+        zoom: 4,
+        center: {{lat: {center["lat"]}, lng: {center["lng"]}}},
+        mapTypeId: "terrain"
+      }});
+      const bounds = new google.maps.LatLngBounds();
+      data.points.forEach((point, index) => {{
+        const pos = {{lat: point.lat, lng: point.lng}};
+        new google.maps.Marker({{position: pos, map, label: String((index % 9) + 1), title: point.label || "Point"}});
+        bounds.extend(pos);
+      }});
+      data.lines.forEach((line) => {{
+        const path = line.map((point) => ({{lat: point.lat, lng: point.lng}}));
+        new google.maps.Polyline({{path, map, geodesic: true, strokeColor: "#0b57d0", strokeOpacity: 0.9, strokeWeight: 3}});
+        path.forEach((pos) => bounds.extend(pos));
+      }});
+      if (!bounds.isEmpty()) map.fitBounds(bounds);
+    }}
+  </script>
+  <script async defer src="https://maps.googleapis.com/maps/api/js{maps_query}"></script>
+</body>
+</html>
+"""
+
+
 class AbbApiGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ABB API GUI Tester")
         self.geometry("1240x880")
         self.shared_auth: Dict[str, Any] = {}
+        self.last_api_tab: Optional[tk.Misc] = None
 
         toolbar = ttk.Frame(self, padding=(10, 8, 10, 0))
         toolbar.pack(fill=tk.X)
@@ -1124,16 +1352,26 @@ class AbbApiGui(tk.Tk):
         env_box.pack(side=tk.LEFT, padx=6)
         env_box.bind("<<ComboboxSelected>>", lambda _event: self.apply_environment())
 
-        tabs = ttk.Notebook(self)
-        tabs.pack(fill=tk.BOTH, expand=True)
-        self.vessel_tab = VesselRoutingFrame(tabs)
-        self.voyage_tab = VoyageConfigurationFrame(tabs)
-        self.product_tab = ProductApiFrame(tabs)
-        self.notification_tab = NotificationApiFrame(tabs)
-        tabs.add(self.vessel_tab, text="Vessel Routing API")
-        tabs.add(self.voyage_tab, text="Voyage Configuration API")
-        tabs.add(self.product_tab, text="Product API")
-        tabs.add(self.notification_tab, text="Notification API")
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill=tk.BOTH, expand=True)
+        self.vessel_tab = VesselRoutingFrame(self.tabs)
+        self.voyage_tab = VoyageConfigurationFrame(self.tabs)
+        self.product_tab = ProductApiFrame(self.tabs)
+        self.notification_tab = NotificationApiFrame(self.tabs)
+        self.map_tab = MapPreviewFrame(self.tabs)
+        self.api_tabs = {self.vessel_tab, self.voyage_tab, self.product_tab, self.notification_tab}
+        self.last_api_tab = self.vessel_tab
+        self.tabs.add(self.vessel_tab, text="Vessel Routing API")
+        self.tabs.add(self.voyage_tab, text="Voyage Configuration API")
+        self.tabs.add(self.product_tab, text="Product API")
+        self.tabs.add(self.notification_tab, text="Notification API")
+        self.tabs.add(self.map_tab, text="Map Preview")
+        self.tabs.bind("<<NotebookTabChanged>>", self._remember_active_api_tab)
+
+    def _remember_active_api_tab(self, _event: tk.Event) -> None:
+        selected = self.tabs.nametowidget(self.tabs.select())
+        if selected in self.api_tabs:
+            self.last_api_tab = selected
 
     def apply_environment(self) -> None:
         env = ENVIRONMENT_URLS[self.environment_var.get()]
