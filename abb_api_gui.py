@@ -18,7 +18,8 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, Optional
 
 import requests
@@ -43,6 +44,27 @@ PRODUCT_DEFAULT_SCOPE = "product:report:access"
 NOTIFICATION_REST_BASE_URL = "https://dev.api.voyageoptimization.abb.com"
 NOTIFICATION_WS_URL = "wss://dev.api.voyageoptimization.abb.com/voyage/notification/v1/ws/products"
 NOTIFICATION_DEFAULT_SCOPE = "notification:report:read"
+
+ENVIRONMENT_URLS = {
+    "dev": {
+        "token": TOKEN_URL,
+        "vessel_rest": VESSEL_REST_BASE_URL,
+        "vessel_ws": VESSEL_WS_BASE_URL,
+        "voyage_api": VOYAGE_API_BASE_URL,
+        "product_base": PRODUCT_BASE_URL,
+        "notification_rest": NOTIFICATION_REST_BASE_URL,
+        "notification_ws": NOTIFICATION_WS_URL,
+    },
+    "prod": {
+        "token": TOKEN_URL,
+        "vessel_rest": "https://api.voyageoptimization.abb.com/vessel-routing/v2",
+        "vessel_ws": "wss://api.voyageoptimization.abb.com/vessel-routing/v2",
+        "voyage_api": "https://api.voyageoptimization.abb.com",
+        "product_base": "https://api.voyageoptimization.abb.com/voyage/products/v1",
+        "notification_rest": "https://api.voyageoptimization.abb.com",
+        "notification_ws": "wss://api.voyageoptimization.abb.com/voyage/notification/v1/ws/products",
+    },
+}
 
 VESSEL_ASYNC_ENDPOINTS = {
     "Shortest path": ("/shortest-path", "routing:shortest-path:access"),
@@ -208,6 +230,51 @@ class LogMixin:
     def _init_log_queue(self) -> None:
         self.log_queue: queue.Queue[str] = queue.Queue()
 
+    def _remember_auth(self, data: Dict[str, str], body: Dict[str, Any]) -> None:
+        self.access_token = body["access_token"]
+        root = self.winfo_toplevel()
+        if hasattr(root, "shared_auth"):
+            root.shared_auth.update(
+                {
+                    "client_id": data.get("client_id", ""),
+                    "client_secret": data.get("client_secret", ""),
+                    "scope": data.get("scope", ""),
+                    "token_url": self.token_url_var.get().strip(),
+                    "access_token": self.access_token,
+                    "expires_at": time.time() + int(body.get("expires_in", 0) or 0),
+                }
+            )
+
+    def use_shared_auth(self) -> None:
+        root = self.winfo_toplevel()
+        shared = getattr(root, "shared_auth", {})
+        if not shared.get("access_token") and not shared.get("client_id"):
+            messagebox.showinfo("Shared Auth", "No shared auth is available yet.")
+            return
+        for name, key in (
+            ("client_id_var", "client_id"),
+            ("client_secret_var", "client_secret"),
+            ("scope_var", "scope"),
+            ("token_url_var", "token_url"),
+        ):
+            if hasattr(self, name) and shared.get(key):
+                getattr(self, name).set(shared[key])
+        self.access_token = shared.get("access_token") or self.access_token
+        self.log("Shared auth copied into this tab.")
+
+    def _effective_token(self) -> Optional[str]:
+        if self.access_token:
+            return self.access_token
+        root = self.winfo_toplevel()
+        shared = getattr(root, "shared_auth", {})
+        return shared.get("access_token")
+
+    def _require_token(self) -> str:
+        token = self._effective_token()
+        if not token:
+            raise RuntimeError("Access token is empty. Click 'Get Token' or 'Use Shared Auth' first.")
+        return token
+
     def log(self, message: str) -> None:
         ts = time.strftime("%H:%M:%S")
         self.log_queue.put(f"[{ts}] {message}\n")
@@ -234,6 +301,40 @@ class LogMixin:
         if rate_headers:
             self.log(f"Rate limit: {json.dumps(rate_headers)}")
 
+    def save_log(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save Log",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            Path(path).write_text(self.log_text.get("1.0", tk.END), encoding="utf-8")
+            self.log(f"Log saved: {path}")
+
+    def load_json_preset(self) -> None:
+        if not hasattr(self, "request_text"):
+            return
+        path = filedialog.askopenfilename(
+            title="Load JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if path:
+            self.request_text.delete("1.0", tk.END)
+            self.request_text.insert("1.0", Path(path).read_text(encoding="utf-8"))
+            self.log(f"JSON loaded: {path}")
+
+    def save_json_preset(self) -> None:
+        if not hasattr(self, "request_text"):
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if path:
+            Path(path).write_text(self.request_text.get("1.0", tk.END).strip() + "\n", encoding="utf-8")
+            self.log(f"JSON saved: {path}")
+
 
 class VesselRoutingFrame(ttk.Frame, LogMixin):
     def __init__(self, master: tk.Misc) -> None:
@@ -256,6 +357,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
         ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+        ttk.Button(auth, text="Use Shared Auth", command=self.use_shared_auth).grid(row=0, column=5, rowspan=2, padx=5, pady=5, sticky="ns")
 
         ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
@@ -313,6 +415,9 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom, text="Load JSON", command=self.load_json_preset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom, text="Save JSON", command=self.save_json_preset).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom, text="Load Sample ShortestPath", command=self.load_sample_shortest_path).pack(side=tk.LEFT, padx=5)
 
     def load_sample_shortest_path(self) -> None:
@@ -320,9 +425,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         self.request_text.insert("1.0", json.dumps(DEFAULT_SHORTEST_PATH_REQUEST, indent=2))
 
     def _headers(self) -> Dict[str, str]:
-        if not self.access_token:
-            raise RuntimeError("Access token is empty. Click 'Get Token' first.")
-        return {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
+        return {"Authorization": f"Bearer {self._require_token()}", "Accept": "application/json"}
 
     def _get_request_json(self) -> Dict[str, Any]:
         raw = self.request_text.get("1.0", tk.END).strip()
@@ -347,7 +450,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 self.log(f"Token response HTTP {resp.status_code}")
                 resp.raise_for_status()
                 body = resp.json()
-                self.access_token = body["access_token"]
+                self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
                 self.log("Token saved in memory.")
             except Exception as exc:
@@ -389,15 +492,13 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
     def send_ws_request(self) -> None:
         def worker() -> None:
             try:
-                if not self.access_token:
-                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
                 path, _scope = VESSEL_ASYNC_ENDPOINTS[self.async_endpoint_var.get()]
                 url = self.ws_base_var.get().rstrip("/") + path
                 payload = self._get_request_json()
                 self.log(f"Opening WebSocket: {url}")
 
                 headers = [
-                    f"Authorization: Bearer {self.access_token}",
+                    f"Authorization: Bearer {self._require_token()}",
                     f"client_id: {self.ws_client_id_var.get().strip()}",
                 ]
                 ws = websocket.create_connection(url, header=headers, timeout=30)
@@ -450,6 +551,7 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
         ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+        ttk.Button(auth, text="Use Shared Auth", command=self.use_shared_auth).grid(row=0, column=5, rowspan=2, padx=5, pady=5, sticky="ns")
 
         ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
@@ -521,6 +623,9 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom, text="Load JSON", command=self.load_json_preset).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bottom, text="Save JSON", command=self.save_json_preset).pack(side=tk.LEFT, padx=5)
 
     def get_token(self) -> None:
         def worker() -> None:
@@ -539,7 +644,7 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
                 self._log_rate_limit_headers(resp)
                 resp.raise_for_status()
                 body = resp.json()
-                self.access_token = body["access_token"]
+                self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
                 self.log("Token saved in memory.")
             except Exception as exc:
@@ -551,8 +656,6 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
     def send_request(self) -> None:
         def worker() -> None:
             try:
-                if not self.access_token:
-                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
                 endpoint = VOYAGE_ENDPOINTS[self.endpoint_var.get()]
                 method = endpoint["method"]
                 path = self._build_path(endpoint)
@@ -603,7 +706,7 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         return {name: fields[name].get().strip() for name in requested if fields[name].get().strip()}
 
     def _headers(self, has_body: bool) -> Dict[str, str]:
-        headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
+        headers = {"Authorization": f"Bearer {self._require_token()}", "Accept": "application/json"}
         if has_body:
             headers["Content-Type"] = "application/json"
         return headers
@@ -642,6 +745,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
         ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+        ttk.Button(auth, text="Use Shared Auth", command=self.use_shared_auth).grid(row=0, column=5, rowspan=2, padx=5, pady=5, sticky="ns")
 
         ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
@@ -699,6 +803,11 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         ttk.Label(controls, text="Schedule ID").grid(row=4, column=3, sticky="w", padx=5, pady=3)
         ttk.Entry(controls, textvariable=self.route_schedule_id_var).grid(row=4, column=4, columnspan=2, sticky="we", padx=5, pady=3)
 
+        self.product_url_var = tk.StringVar()
+        ttk.Label(controls, text="Product URL").grid(row=5, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.product_url_var).grid(row=5, column=1, columnspan=4, sticky="we", padx=5, pady=3)
+        ttk.Button(controls, text="Download URL", command=self.download_product_url).grid(row=5, column=5, sticky="we", padx=5, pady=3)
+
         for col in range(6):
             controls.columnconfigure(col, weight=1)
 
@@ -710,6 +819,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
 
     def get_token(self) -> None:
         def worker() -> None:
@@ -727,7 +837,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
                 self.log(f"Token response HTTP {resp.status_code}")
                 resp.raise_for_status()
                 body = resp.json()
-                self.access_token = body["access_token"]
+                self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
                 self.log("Token saved in memory.")
             except Exception as exc:
@@ -739,8 +849,6 @@ class ProductApiFrame(ttk.Frame, LogMixin):
     def send_request(self) -> None:
         def worker() -> None:
             try:
-                if not self.access_token:
-                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
                 endpoint = PRODUCT_ENDPOINTS[self.endpoint_var.get()]
                 path = self._build_path(endpoint)
                 params = self._build_params(endpoint)
@@ -754,6 +862,22 @@ class ProductApiFrame(ttk.Frame, LogMixin):
             except Exception as exc:
                 self.log(f"ERROR: {exc}")
                 messagebox.showerror("Product API Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def download_product_url(self) -> None:
+        def worker() -> None:
+            try:
+                url = self.product_url_var.get().strip()
+                if not url:
+                    raise ValueError("Product URL is required.")
+                self.log(f"GET {url}")
+                resp = requests.get(url, headers=self._headers(), timeout=60)
+                self.log(f"HTTP {resp.status_code}")
+                self._log_download_or_response(resp)
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Product Download Error", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -786,7 +910,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         return {name: fields[name].get().strip() for name in requested if fields[name].get().strip()}
 
     def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.access_token}", "Accept": "*/*"}
+        return {"Authorization": f"Bearer {self._require_token()}", "Accept": "*/*"}
 
     def _log_download_or_response(self, resp: requests.Response) -> None:
         content_type = resp.headers.get("Content-Type", "")
@@ -795,9 +919,22 @@ class ProductApiFrame(ttk.Frame, LogMixin):
             return
         self.log(f"Content-Type: {content_type or 'unknown'}")
         self.log(f"Downloaded bytes: {len(resp.content)}")
+        if resp.ok and resp.content:
+            suggested = self.filename_var.get().strip() or "product-download.bin"
+            self.after(0, lambda: self._save_download(resp.content, suggested))
         text_preview = resp.text[:2000] if resp.encoding else ""
         if text_preview:
             self.log(text_preview)
+
+    def _save_download(self, content: bytes, suggested: str) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save Product",
+            initialfile=suggested,
+            filetypes=[("All files", "*.*")],
+        )
+        if path:
+            Path(path).write_bytes(content)
+            self.log(f"Product saved: {path}")
 
 
 class NotificationApiFrame(ttk.Frame, LogMixin):
@@ -823,6 +960,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
         ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+        ttk.Button(auth, text="Use Shared Auth", command=self.use_shared_auth).grid(row=0, column=5, rowspan=2, padx=5, pady=5, sticky="ns")
 
         ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
@@ -844,9 +982,11 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
 
         controls = ttk.LabelFrame(self, text="Notification Test")
         controls.pack(fill=tk.X, pady=(0, 8))
+        self.auto_reconnect_var = tk.BooleanVar(value=True)
         ttk.Button(controls, text="Health Check", command=self.health_check).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(controls, text="Connect WebSocket", command=self.connect_ws).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(controls, text="Disconnect", command=self.disconnect_ws).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Checkbutton(controls, text="Auto reconnect", variable=self.auto_reconnect_var).pack(side=tk.LEFT, padx=12, pady=5)
 
         log_frame = ttk.LabelFrame(self, text="Response / Log")
         log_frame.pack(fill=tk.BOTH, expand=True)
@@ -856,6 +996,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
 
     def get_token(self) -> None:
         def worker() -> None:
@@ -873,7 +1014,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
                 self.log(f"Token response HTTP {resp.status_code}")
                 resp.raise_for_status()
                 body = resp.json()
-                self.access_token = body["access_token"]
+                self._remember_auth(data, body)
                 self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
                 self.log("Token saved in memory.")
             except Exception as exc:
@@ -898,31 +1039,55 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
 
     def connect_ws(self) -> None:
         def worker() -> None:
-            try:
-                if not self.access_token:
-                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
-                self.stop_ws.clear()
-                self.log(f"Opening WebSocket: {self.ws_url_var.get().strip()}")
-                self.ws = websocket.create_connection(
-                    self.ws_url_var.get().strip(),
-                    header=[f"Authorization: Bearer {self.access_token}"],
-                    timeout=30,
-                )
-                self.log("WebSocket connected. Waiting for product notifications...")
-                while not self.stop_ws.is_set():
-                    msg = self.ws.recv()
+            self.stop_ws.clear()
+            while not self.stop_ws.is_set():
+                try:
+                    self.log(f"Opening WebSocket: {self.ws_url_var.get().strip()}")
+                    self.ws = websocket.create_connection(
+                        self.ws_url_var.get().strip(),
+                        header=[f"Authorization: Bearer {self._require_token()}"],
+                        timeout=30,
+                    )
+                    self.log("WebSocket connected. Waiting for product notifications...")
+                    while not self.stop_ws.is_set():
+                        msg = self.ws.recv()
+                        try:
+                            self.log(json.dumps(json.loads(msg), indent=2)[:50000])
+                        except json.JSONDecodeError:
+                            self.log(str(msg)[:50000])
+                except Exception as exc:
+                    self._close_ws()
+                    if self.stop_ws.is_set():
+                        break
+                    self.log(f"WebSocket disconnected: {exc}")
+                    if not self.auto_reconnect_var.get():
+                        messagebox.showerror("WebSocket Error", str(exc))
+                        break
+                    self.log("Refreshing token before reconnect...")
                     try:
-                        self.log(json.dumps(json.loads(msg), indent=2)[:50000])
-                    except json.JSONDecodeError:
-                        self.log(str(msg)[:50000])
-            except Exception as exc:
-                if not self.stop_ws.is_set():
-                    self.log(f"ERROR: {exc}")
-                    messagebox.showerror("WebSocket Error", str(exc))
-            finally:
-                self._close_ws()
+                        self._refresh_token_sync()
+                    except Exception as token_exc:
+                        self.log(f"Token refresh failed: {token_exc}")
+                    self.log("Reconnecting in 5 seconds...")
+                    self.stop_ws.wait(5)
+            self._close_ws()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_token_sync(self) -> None:
+        data = {
+            "client_id": self.client_id_var.get().strip(),
+            "client_secret": self.client_secret_var.get().strip(),
+            "scope": self.scope_var.get().strip(),
+            "grant_type": "client_credentials",
+        }
+        if not data["client_id"] or not data["client_secret"]:
+            return
+        resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+        self.log(f"Token refresh HTTP {resp.status_code}")
+        resp.raise_for_status()
+        body = resp.json()
+        self._remember_auth(data, body)
 
     def disconnect_ws(self) -> None:
         self.stop_ws.set()
@@ -943,13 +1108,45 @@ class AbbApiGui(tk.Tk):
         super().__init__()
         self.title("ABB API GUI Tester")
         self.geometry("1240x880")
+        self.shared_auth: Dict[str, Any] = {}
+
+        toolbar = ttk.Frame(self, padding=(10, 8, 10, 0))
+        toolbar.pack(fill=tk.X)
+        ttk.Label(toolbar, text="Environment").pack(side=tk.LEFT)
+        self.environment_var = tk.StringVar(value="dev")
+        env_box = ttk.Combobox(
+            toolbar,
+            textvariable=self.environment_var,
+            values=list(ENVIRONMENT_URLS.keys()),
+            state="readonly",
+            width=10,
+        )
+        env_box.pack(side=tk.LEFT, padx=6)
+        env_box.bind("<<ComboboxSelected>>", lambda _event: self.apply_environment())
 
         tabs = ttk.Notebook(self)
         tabs.pack(fill=tk.BOTH, expand=True)
-        tabs.add(VesselRoutingFrame(tabs), text="Vessel Routing API")
-        tabs.add(VoyageConfigurationFrame(tabs), text="Voyage Configuration API")
-        tabs.add(ProductApiFrame(tabs), text="Product API")
-        tabs.add(NotificationApiFrame(tabs), text="Notification API")
+        self.vessel_tab = VesselRoutingFrame(tabs)
+        self.voyage_tab = VoyageConfigurationFrame(tabs)
+        self.product_tab = ProductApiFrame(tabs)
+        self.notification_tab = NotificationApiFrame(tabs)
+        tabs.add(self.vessel_tab, text="Vessel Routing API")
+        tabs.add(self.voyage_tab, text="Voyage Configuration API")
+        tabs.add(self.product_tab, text="Product API")
+        tabs.add(self.notification_tab, text="Notification API")
+
+    def apply_environment(self) -> None:
+        env = ENVIRONMENT_URLS[self.environment_var.get()]
+        self.vessel_tab.token_url_var.set(env["token"])
+        self.vessel_tab.rest_base_var.set(env["vessel_rest"])
+        self.vessel_tab.ws_base_var.set(env["vessel_ws"])
+        self.voyage_tab.token_url_var.set(env["token"])
+        self.voyage_tab.api_base_var.set(env["voyage_api"])
+        self.product_tab.token_url_var.set(env["token"])
+        self.product_tab.base_url_var.set(env["product_base"])
+        self.notification_tab.token_url_var.set(env["token"])
+        self.notification_tab.rest_base_var.set(env["notification_rest"])
+        self.notification_tab.ws_url_var.set(env["notification_ws"])
 
 
 def main() -> None:
