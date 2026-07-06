@@ -4,6 +4,8 @@ ABB API GUI Tester
 One Tkinter app for:
 - Vessel Routing API tests
 - Voyage Configuration API tests
+- Product API tests
+- Notification API tests
 
 Run:
     python abb_api_gui.py
@@ -36,6 +38,11 @@ VOYAGE_DEFAULT_SCOPE = (
     "voyage:route-advice:access "
     "voyage:route-comparison:access"
 )
+PRODUCT_BASE_URL = "https://dev.api.voyageoptimization.abb.com/voyage/products/v1"
+PRODUCT_DEFAULT_SCOPE = "product:report:access"
+NOTIFICATION_REST_BASE_URL = "https://dev.api.voyageoptimization.abb.com"
+NOTIFICATION_WS_URL = "wss://dev.api.voyageoptimization.abb.com/voyage/notification/v1/ws/products"
+NOTIFICATION_DEFAULT_SCOPE = "notification:report:read"
 
 VESSEL_ASYNC_ENDPOINTS = {
     "Shortest path": ("/shortest-path", "routing:shortest-path:access"),
@@ -164,6 +171,35 @@ VOYAGE_SAMPLES: Dict[str, Dict[str, Any]] = {
             "name": "Same Route",
             "comments": "This is the comparison of route advices for your voyage.",
         },
+    },
+}
+
+PRODUCT_ENDPOINTS = {
+    "Get Product Status": {
+        "path": "/reports/{correlationId}",
+        "needs_correlation_id": True,
+    },
+    "Download Product": {
+        "path": "/reports/{correlationId}/{filename}",
+        "needs_correlation_id": True,
+        "needs_filename": True,
+    },
+    "Get Last Sent Product": {
+        "path": "/reports/last-sent",
+        "query": ["imo", "productName", "customerReferenceId"],
+    },
+    "Search Products": {
+        "path": "/reports/search",
+        "query": [
+            "imo",
+            "from",
+            "to",
+            "productName",
+            "status",
+            "customerReferenceId",
+            "voyageInfoId",
+            "routeCalculationScheduleId",
+        ],
     },
 }
 
@@ -585,6 +621,323 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         return parsed
 
 
+class ProductApiFrame(ttk.Frame, LogMixin):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, padding=10)
+        self.access_token: Optional[str] = None
+        self._init_log_queue()
+        self._build_ui()
+        self.after(100, self._flush_log_queue)
+
+    def _build_ui(self) -> None:
+        auth = ttk.LabelFrame(self, text="Authentication")
+        auth.pack(fill=tk.X, pady=(0, 8))
+
+        self.client_id_var = tk.StringVar()
+        self.client_secret_var = tk.StringVar()
+        self.scope_var = tk.StringVar(value=PRODUCT_DEFAULT_SCOPE)
+
+        ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.client_id_var, width=42).grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
+        ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+
+        ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
+        auth.columnconfigure(1, weight=1)
+        auth.columnconfigure(3, weight=1)
+
+        urls = ttk.LabelFrame(self, text="URLs")
+        urls.pack(fill=tk.X, pady=(0, 8))
+        self.base_url_var = tk.StringVar(value=PRODUCT_BASE_URL)
+        self.token_url_var = tk.StringVar(value=TOKEN_URL)
+        ttk.Label(urls, text="Product Base").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(urls, textvariable=self.base_url_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(urls, text="Token URL").grid(row=1, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(urls, textvariable=self.token_url_var).grid(row=1, column=1, sticky="we", padx=5, pady=3)
+        urls.columnconfigure(1, weight=1)
+
+        controls = ttk.LabelFrame(self, text="Request")
+        controls.pack(fill=tk.X, pady=(0, 8))
+        self.endpoint_var = tk.StringVar(value="Get Product Status")
+        ttk.Combobox(controls, textvariable=self.endpoint_var, values=list(PRODUCT_ENDPOINTS.keys()), state="readonly", width=32).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Button(controls, text="Send Request", command=self.send_request).grid(row=0, column=1, padx=5, pady=5)
+
+        self.correlation_id_var = tk.StringVar()
+        self.filename_var = tk.StringVar(value="RouteAdvice.pdf")
+        self.imo_var = tk.StringVar()
+        self.from_var = tk.StringVar()
+        self.to_var = tk.StringVar()
+        self.product_name_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="All")
+        self.customer_ref_var = tk.StringVar()
+        self.voyage_info_id_var = tk.StringVar()
+        self.route_schedule_id_var = tk.StringVar()
+
+        ttk.Label(controls, text="Correlation ID").grid(row=1, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.correlation_id_var).grid(row=1, column=1, columnspan=2, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="Filename").grid(row=1, column=3, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.filename_var).grid(row=1, column=4, columnspan=2, sticky="we", padx=5, pady=3)
+
+        ttk.Label(controls, text="IMO").grid(row=2, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.imo_var).grid(row=2, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="From").grid(row=2, column=2, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.from_var).grid(row=2, column=3, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="To").grid(row=2, column=4, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.to_var).grid(row=2, column=5, sticky="we", padx=5, pady=3)
+
+        ttk.Label(controls, text="Product").grid(row=3, column=0, sticky="w", padx=5, pady=3)
+        ttk.Combobox(controls, textvariable=self.product_name_var, values=["", "RouteAdvice", "RouteComparison"], state="readonly", width=16).grid(row=3, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="Status").grid(row=3, column=2, sticky="w", padx=5, pady=3)
+        ttk.Combobox(controls, textvariable=self.status_var, values=["All", "New", "Announced", "Sent", "Failed"], state="readonly", width=12).grid(row=3, column=3, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="Customer Ref").grid(row=3, column=4, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.customer_ref_var).grid(row=3, column=5, sticky="we", padx=5, pady=3)
+
+        ttk.Label(controls, text="Voyage Info ID").grid(row=4, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.voyage_info_id_var).grid(row=4, column=1, columnspan=2, sticky="we", padx=5, pady=3)
+        ttk.Label(controls, text="Schedule ID").grid(row=4, column=3, sticky="w", padx=5, pady=3)
+        ttk.Entry(controls, textvariable=self.route_schedule_id_var).grid(row=4, column=4, columnspan=2, sticky="we", padx=5, pady=3)
+
+        for col in range(6):
+            controls.columnconfigure(col, weight=1)
+
+        log_frame = ttk.LabelFrame(self, text="Response / Log")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.NONE)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+
+    def get_token(self) -> None:
+        def worker() -> None:
+            try:
+                data = {
+                    "client_id": self.client_id_var.get().strip(),
+                    "client_secret": self.client_secret_var.get().strip(),
+                    "scope": self.scope_var.get().strip(),
+                    "grant_type": "client_credentials",
+                }
+                if not data["client_id"] or not data["client_secret"]:
+                    raise ValueError("Client ID and Client Secret are required.")
+                self.log("Requesting token...")
+                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                self.log(f"Token response HTTP {resp.status_code}")
+                resp.raise_for_status()
+                body = resp.json()
+                self.access_token = body["access_token"]
+                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
+                self.log("Token saved in memory.")
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Token Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_request(self) -> None:
+        def worker() -> None:
+            try:
+                if not self.access_token:
+                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
+                endpoint = PRODUCT_ENDPOINTS[self.endpoint_var.get()]
+                path = self._build_path(endpoint)
+                params = self._build_params(endpoint)
+                url = self.base_url_var.get().rstrip("/") + path
+                self.log(f"GET {url}")
+                if params:
+                    self.log(f"Query: {json.dumps(params, indent=2)}")
+                resp = requests.get(url, headers=self._headers(), params=params, timeout=60)
+                self.log(f"HTTP {resp.status_code}")
+                self._log_download_or_response(resp)
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Product API Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_path(self, endpoint: Dict[str, Any]) -> str:
+        path = endpoint["path"]
+        if endpoint.get("needs_correlation_id"):
+            correlation_id = self.correlation_id_var.get().strip()
+            if not correlation_id:
+                raise ValueError("Correlation ID is required for this endpoint.")
+            path = path.replace("{correlationId}", correlation_id)
+        if endpoint.get("needs_filename"):
+            filename = self.filename_var.get().strip()
+            if not filename:
+                raise ValueError("Filename is required for this endpoint.")
+            path = path.replace("{filename}", filename)
+        return path
+
+    def _build_params(self, endpoint: Dict[str, Any]) -> Dict[str, str]:
+        requested = endpoint.get("query", [])
+        fields = {
+            "imo": self.imo_var,
+            "from": self.from_var,
+            "to": self.to_var,
+            "productName": self.product_name_var,
+            "status": self.status_var,
+            "customerReferenceId": self.customer_ref_var,
+            "voyageInfoId": self.voyage_info_id_var,
+            "routeCalculationScheduleId": self.route_schedule_id_var,
+        }
+        return {name: fields[name].get().strip() for name in requested if fields[name].get().strip()}
+
+    def _headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.access_token}", "Accept": "*/*"}
+
+    def _log_download_or_response(self, resp: requests.Response) -> None:
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" in content_type or "problem+json" in content_type:
+            self._log_response(resp)
+            return
+        self.log(f"Content-Type: {content_type or 'unknown'}")
+        self.log(f"Downloaded bytes: {len(resp.content)}")
+        text_preview = resp.text[:2000] if resp.encoding else ""
+        if text_preview:
+            self.log(text_preview)
+
+
+class NotificationApiFrame(ttk.Frame, LogMixin):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, padding=10)
+        self.access_token: Optional[str] = None
+        self.ws: Optional[websocket.WebSocket] = None
+        self.stop_ws = threading.Event()
+        self._init_log_queue()
+        self._build_ui()
+        self.after(100, self._flush_log_queue)
+
+    def _build_ui(self) -> None:
+        auth = ttk.LabelFrame(self, text="Authentication")
+        auth.pack(fill=tk.X, pady=(0, 8))
+
+        self.client_id_var = tk.StringVar()
+        self.client_secret_var = tk.StringVar()
+        self.scope_var = tk.StringVar(value=NOTIFICATION_DEFAULT_SCOPE)
+
+        ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.client_id_var, width=42).grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        ttk.Label(auth, text="Client Secret").grid(row=0, column=2, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.client_secret_var, width=42, show="*").grid(row=0, column=3, sticky="we", padx=5, pady=5)
+        ttk.Button(auth, text="Get Token", command=self.get_token).grid(row=0, column=4, rowspan=2, padx=8, pady=5, sticky="ns")
+
+        ttk.Label(auth, text="Scope").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(auth, textvariable=self.scope_var).grid(row=1, column=1, columnspan=3, sticky="we", padx=5, pady=5)
+        auth.columnconfigure(1, weight=1)
+        auth.columnconfigure(3, weight=1)
+
+        urls = ttk.LabelFrame(self, text="URLs")
+        urls.pack(fill=tk.X, pady=(0, 8))
+        self.rest_base_var = tk.StringVar(value=NOTIFICATION_REST_BASE_URL)
+        self.ws_url_var = tk.StringVar(value=NOTIFICATION_WS_URL)
+        self.token_url_var = tk.StringVar(value=TOKEN_URL)
+        ttk.Label(urls, text="REST Base").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(urls, textvariable=self.rest_base_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(urls, text="WS URL").grid(row=1, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(urls, textvariable=self.ws_url_var).grid(row=1, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(urls, text="Token URL").grid(row=2, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(urls, textvariable=self.token_url_var).grid(row=2, column=1, sticky="we", padx=5, pady=3)
+        urls.columnconfigure(1, weight=1)
+
+        controls = ttk.LabelFrame(self, text="Notification Test")
+        controls.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(controls, text="Health Check", command=self.health_check).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Button(controls, text="Connect WebSocket", command=self.connect_ws).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Button(controls, text="Disconnect", command=self.disconnect_ws).pack(side=tk.LEFT, padx=5, pady=5)
+
+        log_frame = ttk.LabelFrame(self, text="Response / Log")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.NONE)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        bottom = ttk.Frame(self)
+        bottom.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(bottom, text="Clear Log", command=lambda: self.log_text.delete("1.0", tk.END)).pack(side=tk.LEFT)
+
+    def get_token(self) -> None:
+        def worker() -> None:
+            try:
+                data = {
+                    "client_id": self.client_id_var.get().strip(),
+                    "client_secret": self.client_secret_var.get().strip(),
+                    "scope": self.scope_var.get().strip(),
+                    "grant_type": "client_credentials",
+                }
+                if not data["client_id"] or not data["client_secret"]:
+                    raise ValueError("Client ID and Client Secret are required.")
+                self.log("Requesting token...")
+                resp = requests.post(self.token_url_var.get().strip(), data=data, timeout=30)
+                self.log(f"Token response HTTP {resp.status_code}")
+                resp.raise_for_status()
+                body = resp.json()
+                self.access_token = body["access_token"]
+                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
+                self.log("Token saved in memory.")
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Token Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def health_check(self) -> None:
+        def worker() -> None:
+            try:
+                url = self.rest_base_var.get().rstrip("/") + "/voyage/notification/v1/health-check"
+                self.log(f"GET {url}")
+                resp = requests.get(url, timeout=30)
+                self.log(f"HTTP {resp.status_code}")
+                self._log_response(resp)
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Notification API Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def connect_ws(self) -> None:
+        def worker() -> None:
+            try:
+                if not self.access_token:
+                    raise RuntimeError("Access token is empty. Click 'Get Token' first.")
+                self.stop_ws.clear()
+                self.log(f"Opening WebSocket: {self.ws_url_var.get().strip()}")
+                self.ws = websocket.create_connection(
+                    self.ws_url_var.get().strip(),
+                    header=[f"Authorization: Bearer {self.access_token}"],
+                    timeout=30,
+                )
+                self.log("WebSocket connected. Waiting for product notifications...")
+                while not self.stop_ws.is_set():
+                    msg = self.ws.recv()
+                    try:
+                        self.log(json.dumps(json.loads(msg), indent=2)[:50000])
+                    except json.JSONDecodeError:
+                        self.log(str(msg)[:50000])
+            except Exception as exc:
+                if not self.stop_ws.is_set():
+                    self.log(f"ERROR: {exc}")
+                    messagebox.showerror("WebSocket Error", str(exc))
+            finally:
+                self._close_ws()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def disconnect_ws(self) -> None:
+        self.stop_ws.set()
+        self._close_ws()
+        self.log("WebSocket disconnect requested.")
+
+    def _close_ws(self) -> None:
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+
 class AbbApiGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -595,6 +948,8 @@ class AbbApiGui(tk.Tk):
         tabs.pack(fill=tk.BOTH, expand=True)
         tabs.add(VesselRoutingFrame(tabs), text="Vessel Routing API")
         tabs.add(VoyageConfigurationFrame(tabs), text="Voyage Configuration API")
+        tabs.add(ProductApiFrame(tabs), text="Product API")
+        tabs.add(NotificationApiFrame(tabs), text="Notification API")
 
 
 def main() -> None:
