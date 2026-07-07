@@ -2065,7 +2065,7 @@ class MapPreviewFrame(ttk.Frame):
         try:
             if crosses_antimeridian:
                 self.map_widget.set_position(center_lat, center_lng)
-                self.map_widget.set_zoom(self._zoom_for_span(max(lats) - min(lats), (east_lng + 360) - west_lng))
+                self.map_widget.set_zoom(self._zoom_for_span(max(lats) - min(lats), east_lng - west_lng))
             else:
                 self.map_widget.fit_bounding_box((max(lats), west_lng), (min(lats), east_lng))
         except Exception:
