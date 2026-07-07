@@ -22,12 +22,19 @@ import time
 import tkinter as tk
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import websocket
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
 
 
 def _load_local_defaults() -> Dict[str, str]:
@@ -300,91 +307,13 @@ RTZ_REQUEST_TYPES = {
     "Optimal Speed Request": "Optimal set speed",
 }
 
-GLOBE_LANDMASSES: List[List[Tuple[float, float]]] = [
-    [
-        (72, -168),
-        (70, -140),
-        (60, -125),
-        (48, -124),
-        (32, -117),
-        (17, -99),
-        (8, -82),
-        (18, -75),
-        (26, -81),
-        (39, -74),
-        (49, -67),
-        (58, -63),
-        (64, -78),
-        (70, -98),
-        (72, -130),
-    ],
-    [
-        (13, -81),
-        (11, -67),
-        (5, -52),
-        (-7, -35),
-        (-23, -41),
-        (-35, -56),
-        (-54, -70),
-        (-44, -75),
-        (-22, -70),
-        (-5, -81),
-    ],
-    [
-        (72, -10),
-        (70, 40),
-        (72, 95),
-        (66, 170),
-        (54, 160),
-        (36, 139),
-        (10, 106),
-        (8, 78),
-        (25, 57),
-        (30, 32),
-        (36, 10),
-        (45, -5),
-        (56, -10),
-        (65, -24),
-    ],
-    [
-        (35, -17),
-        (37, 10),
-        (31, 32),
-        (12, 43),
-        (-5, 40),
-        (-34, 20),
-        (-35, 16),
-        (-22, 12),
-        (-5, 10),
-        (6, -5),
-        (20, -17),
-    ],
-    [
-        (-10, 113),
-        (-12, 142),
-        (-25, 154),
-        (-39, 146),
-        (-34, 115),
-        (-20, 112),
-    ],
-    [
-        (83, -73),
-        (82, -22),
-        (70, -20),
-        (60, -44),
-        (62, -58),
-        (75, -72),
-    ],
-    [
-        (-62, -180),
-        (-66, -120),
-        (-72, -60),
-        (-75, 0),
-        (-72, 60),
-        (-66, 120),
-        (-62, 180),
-    ],
-]
+EARTH_TEXTURE_URL = (
+    "https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/"
+    "bmng-base/january/world.200401.3x5400x2700.jpg"
+)
+EARTH_TEXTURE_CACHE_NAME = "blue_marble_200401_2048.jpg"
+EARTH_TEXTURE_WIDTH = 2048
+EARTH_TEXTURE_HEIGHT = 1024
 
 VOYAGE_ENDPOINTS = {
     "Create Route Calculation Schedule": {
@@ -1664,6 +1593,10 @@ class GlobeCanvas(tk.Canvas):
         self._cx = 0.0
         self._cy = 0.0
         self._radius = 1.0
+        self._earth_texture: Optional[Any] = None
+        self._earth_texture_status = "Loading NASA Blue Marble satellite texture..."
+        self._earth_texture_loading = False
+        self._globe_photo: Optional[Any] = None
 
         self.bind("<Configure>", lambda _event: self.redraw())
         self.bind("<ButtonPress-1>", self._start_drag)
@@ -1671,6 +1604,7 @@ class GlobeCanvas(tk.Canvas):
         self.bind("<MouseWheel>", self._wheel)
         self.bind("<Button-4>", lambda _event: self._zoom_by(1.12))
         self.bind("<Button-5>", lambda _event: self._zoom_by(1 / 1.12))
+        self._load_earth_texture_async()
 
     def render_map_data(
         self,
@@ -1701,20 +1635,10 @@ class GlobeCanvas(tk.Canvas):
         height = max(self.winfo_height(), 1)
         self._cx = width / 2
         self._cy = height / 2
-        self._radius = max(80.0, min(width, height) * 0.43 * self.zoom)
+        self._radius = max(80.0, min(420.0, min(width, height) * 0.43 * self.zoom))
 
         self.create_rectangle(0, 0, width, height, fill="#07111f", outline="")
-        self.create_oval(
-            self._cx - self._radius,
-            self._cy - self._radius,
-            self._cx + self._radius,
-            self._cy + self._radius,
-            fill="#0f2742",
-            outline="#38bdf8",
-            width=2,
-        )
-        self._draw_landmasses()
-        self._draw_graticule()
+        self._draw_satellite_globe()
         self._draw_lines()
         self._draw_routes()
         self._draw_points()
@@ -1738,30 +1662,124 @@ class GlobeCanvas(tk.Canvas):
         self.zoom = max(0.55, min(2.4, self.zoom * factor))
         self.redraw()
 
-    def _draw_graticule(self) -> None:
-        for lng in range(-180, 181, 30):
-            path = [{"lat": lat, "lng": lng} for lat in range(-90, 91, 5)]
-            self._draw_geo_path(path, "#1d4ed8", 1, samples_per_segment=1)
-        for lat in range(-60, 61, 30):
-            path = [{"lat": lat, "lng": lng} for lng in range(-180, 181, 5)]
-            self._draw_geo_path(path, "#334155", 1, samples_per_segment=1)
+    def _draw_satellite_globe(self) -> None:
+        if Image is None or ImageTk is None:
+            self._draw_texture_fallback("Install Pillow to render the satellite globe.")
+            return
+        if self._earth_texture is None:
+            self._draw_texture_fallback(self._earth_texture_status)
+            return
 
-    def _draw_landmasses(self) -> None:
-        for outline in GLOBE_LANDMASSES:
-            path = [{"lat": lat, "lng": lng} for lat, lng in outline]
-            self._fill_landmass(path)
-            self._draw_geo_path(path, "#14532d", 5, samples_per_segment=4, close_path=True)
-            self._draw_geo_path(path, "#86efac", 1, samples_per_segment=4, close_path=True)
+        diameter = max(120, int(self._radius * 2))
+        globe = self._render_textured_globe(diameter)
+        self._globe_photo = ImageTk.PhotoImage(globe)
+        self.create_image(self._cx, self._cy, image=self._globe_photo)
+        self.create_oval(
+            self._cx - self._radius,
+            self._cy - self._radius,
+            self._cx + self._radius,
+            self._cy + self._radius,
+            outline="#93c5fd",
+            width=1,
+        )
 
-    def _fill_landmass(self, path: List[Dict[str, Any]]) -> None:
-        projected: List[float] = []
-        for point in path:
-            xy = self._project_latlng(float(point["lat"]), float(point["lng"]))
-            if xy is None:
-                return
-            projected.extend(xy)
-        if len(projected) >= 6:
-            self.create_polygon(projected, fill="#123b2f", outline="")
+    def _draw_texture_fallback(self, message: str) -> None:
+        self.create_oval(
+            self._cx - self._radius,
+            self._cy - self._radius,
+            self._cx + self._radius,
+            self._cy + self._radius,
+            fill="#0f2742",
+            outline="#38bdf8",
+            width=2,
+        )
+        self.create_text(
+            self._cx,
+            self._cy,
+            text=message,
+            fill="#cbd5e1",
+            font=("Segoe UI", 9),
+            width=max(180, int(self._radius * 1.5)),
+        )
+
+    def _render_textured_globe(self, diameter: int) -> Any:
+        texture = self._earth_texture
+        radius = diameter / 2
+        image = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
+        pixels = image.load()
+        texture_pixels = texture.load()
+        tex_w, tex_h = texture.size
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+        cos_pitch = math.cos(self.pitch)
+        sin_pitch = math.sin(self.pitch)
+
+        for py in range(diameter):
+            ny = (radius - py - 0.5) / radius
+            for px in range(diameter):
+                nx = (px + 0.5 - radius) / radius
+                distance_sq = nx * nx + ny * ny
+                if distance_sq > 1:
+                    continue
+                nz = math.sqrt(max(0.0, 1.0 - distance_sq))
+
+                world_y = ny * cos_pitch + nz * sin_pitch
+                z1 = -ny * sin_pitch + nz * cos_pitch
+                world_x = nx * cos_yaw - z1 * sin_yaw
+                world_z = nx * sin_yaw + z1 * cos_yaw
+
+                lat = math.asin(max(-1.0, min(1.0, world_y)))
+                lng = math.atan2(world_x, world_z)
+                tx = int(((lng + math.pi) / (2 * math.pi)) * tex_w) % tex_w
+                ty = max(0, min(tex_h - 1, int(((math.pi / 2 - lat) / math.pi) * tex_h)))
+                red, green, blue = texture_pixels[tx, ty][:3]
+                shade = 0.58 + 0.42 * nz
+                pixels[px, py] = (int(red * shade), int(green * shade), int(blue * shade), 255)
+        return image
+
+    def _load_earth_texture_async(self) -> None:
+        if Image is None or self._earth_texture_loading:
+            return
+        self._earth_texture_loading = True
+
+        def worker() -> None:
+            try:
+                texture = self._load_earth_texture()
+                self.after(0, lambda: self._set_earth_texture(texture, "NASA Blue Marble satellite texture loaded."))
+            except Exception as exc:
+                message = str(exc)
+                self.after(0, lambda: self._set_earth_texture_error(message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_earth_texture(self) -> Any:
+        cache_path = self._earth_texture_cache_path()
+        if cache_path.exists():
+            return Image.open(cache_path).convert("RGB")
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        response = requests.get(EARTH_TEXTURE_URL, timeout=60)
+        response.raise_for_status()
+        texture = Image.open(BytesIO(response.content)).convert("RGB")
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        texture = texture.resize((EARTH_TEXTURE_WIDTH, EARTH_TEXTURE_HEIGHT), resample)
+        texture.save(cache_path, "JPEG", quality=90)
+        return texture
+
+    def _earth_texture_cache_path(self) -> Path:
+        base = Path(os.getenv("LOCALAPPDATA") or Path.home())
+        return base / "ABBApiGui" / EARTH_TEXTURE_CACHE_NAME
+
+    def _set_earth_texture(self, texture: Any, status: str) -> None:
+        self._earth_texture = texture
+        self._earth_texture_status = status
+        self._earth_texture_loading = False
+        self.redraw()
+
+    def _set_earth_texture_error(self, message: str) -> None:
+        self._earth_texture_status = f"Satellite texture unavailable: {message}"
+        self._earth_texture_loading = False
+        self.redraw()
 
     def _draw_lines(self) -> None:
         for line in self.lines:
@@ -1872,7 +1890,7 @@ class GlobeCanvas(tk.Canvas):
 
     def _draw_overlay(self, width: int, height: int) -> None:
         route_nodes = sum(len(route.get("points", [])) for route in self.routes)
-        summary = f"3D Globe  Ports {len(self.points)}  Lines {len(self.lines)}  Routes {len(self.routes)}  Nodes {route_nodes}"
+        summary = f"3D Satellite Globe  Ports {len(self.points)}  Lines {len(self.lines)}  Routes {len(self.routes)}  Nodes {route_nodes}"
         self.create_text(14, 12, anchor="nw", text=summary, fill="#e2e8f0", font=("Segoe UI", 9, "bold"))
         legend = [
             ("< 8 kn", "#2563eb"),
