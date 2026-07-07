@@ -55,6 +55,7 @@ def _load_local_defaults() -> Dict[str, str]:
 LOCAL_DEFAULTS = _load_local_defaults()
 
 FIXED_ETA_DURATION_DAYS = 14
+VESSEL_WS_RESPONSE_TIMEOUT_SECONDS = 300
 
 
 def _utc_z(dt: datetime) -> str:
@@ -267,6 +268,7 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
         "config": VESSEL_SAMPLE_CONFIG,
         "speed": 10,
+        "optimizationType": "Fuel",
     },
     "Recommended set speed": {
         "id": "recommended-speed-1",
@@ -276,6 +278,7 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
         "config": VESSEL_SAMPLE_CONFIG,
         "speeds": [{"minimum": 8, "maximum": 12}],
+        "optimizationType": "Fuel",
     },
     "Fixed ETA": {
         "id": "fixed-eta-1",
@@ -286,6 +289,7 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
         "config": VESSEL_SAMPLE_CONFIG,
         "speeds": [{"minimum": 8, "maximum": 12}],
+        "optimizationType": "Fuel",
     },
     "Optimal set speed": {
         "id": "optimal-speed-1",
@@ -293,7 +297,6 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "voyage": VESSEL_SAMPLE_VOYAGE,
         "etd": "2026-07-06T19:20:30Z",
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
-        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
         "config": {**VESSEL_SAMPLE_CONFIG, "minimumHoursBetweenSpeedChanges": 24},
         "speeds": [{"minimum": 8, "maximum": 12}],
         "optimizationType": "Time",
@@ -930,9 +933,10 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     f"client_id: {self.ws_client_id_var.get().strip()}",
                 ]
                 ws = websocket.create_connection(url, header=headers, timeout=30)
+                ws.settimeout(VESSEL_WS_RESPONSE_TIMEOUT_SECONDS)
                 self.log("WebSocket connected. Sending request...")
                 ws.send(json.dumps(payload))
-                self.log("Request sent. Waiting for response...")
+                self.log(f"Request sent. Waiting for response up to {VESSEL_WS_RESPONSE_TIMEOUT_SECONDS} seconds...")
                 ws_messages = []
 
                 while True:
@@ -956,6 +960,10 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                         break
                 ws.close()
                 self.log("WebSocket closed.")
+            except websocket.WebSocketTimeoutException as exc:
+                self.log(f"ERROR: WebSocket response timed out after {VESSEL_WS_RESPONSE_TIMEOUT_SECONDS} seconds.")
+                self.log("If the request still runs server-side, try loading the response by correlation/download URL when available.")
+                messagebox.showerror("WebSocket Timeout", str(exc))
             except Exception as exc:
                 self.log(f"ERROR: {exc}")
                 messagebox.showerror("WebSocket Error", str(exc))
