@@ -287,6 +287,24 @@ RTZ_REQUEST_TYPES = {
     "Optimal Speed Request": "Optimal set speed",
 }
 
+MAP_TILE_PROVIDERS = {
+    "Vector Light": {
+        "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        "max_zoom": 19,
+        "description": "OpenStreetMap vector-style map (no API key)",
+    },
+    "Vector Street": {
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        "max_zoom": 19,
+        "description": "Esri World Street Map (no API key)",
+    },
+    "Satellite": {
+        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        "max_zoom": 19,
+        "description": "Esri World Imagery satellite map (no API key)",
+    },
+}
+
 VOYAGE_ENDPOINTS = {
     "Create Route Calculation Schedule": {
         "method": "POST",
@@ -1555,14 +1573,25 @@ class MapPreviewFrame(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        controls = ttk.LabelFrame(self, text="Embedded Satellite Map Preview")
+        controls = ttk.LabelFrame(self, text="Embedded Vector Map Preview")
         controls.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(controls, text="Provider").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        ttk.Label(controls, text="Esri World Imagery in app (no API key)").grid(row=0, column=1, sticky="w", padx=5, pady=5)
-        ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=2, padx=5, pady=5)
-        ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=3, padx=5, pady=5)
-        ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=4, padx=5, pady=5)
+        self.map_provider_var = tk.StringVar(value="Vector Light")
+        provider_box = ttk.Combobox(
+            controls,
+            textvariable=self.map_provider_var,
+            values=list(MAP_TILE_PROVIDERS.keys()),
+            state="readonly",
+            width=18,
+        )
+        provider_box.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        provider_box.bind("<<ComboboxSelected>>", lambda _event: self.apply_map_provider())
+        self.map_provider_label_var = tk.StringVar(value=MAP_TILE_PROVIDERS["Vector Light"]["description"])
+        ttk.Label(controls, textvariable=self.map_provider_label_var).grid(row=0, column=2, sticky="w", padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=3, padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=4, padx=5, pady=5)
+        ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=5, padx=5, pady=5)
         ttk.Label(controls, text="Max markers").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.max_markers_var = tk.StringVar(value="1000")
         ttk.Spinbox(controls, textvariable=self.max_markers_var, from_=100, to=20000, increment=100, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -1579,7 +1608,7 @@ class MapPreviewFrame(ttk.Frame):
         self.source_text = scrolledtext.ScrolledText(source_frame, wrap=tk.NONE)
         self.source_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        map_frame = ttk.LabelFrame(right_frame, text="Satellite Map")
+        map_frame = ttk.LabelFrame(right_frame, text="Vector Map")
         map_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.map_widget = None
         if tkintermapview is None:
@@ -1590,10 +1619,7 @@ class MapPreviewFrame(ttk.Frame):
         else:
             self.map_widget = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
             self.map_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            self.map_widget.set_tile_server(
-                "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                max_zoom=19,
-            )
+            self.apply_map_provider()
             self.map_widget.set_position(29.7262421, -95.2641144)
             self.map_widget.set_zoom(3)
 
@@ -1606,6 +1632,12 @@ class MapPreviewFrame(ttk.Frame):
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear", command=self.clear).pack(side=tk.LEFT)
         ttk.Button(bottom, text="Reset Map", command=self.reset_map).pack(side=tk.LEFT, padx=5)
+
+    def apply_map_provider(self) -> None:
+        provider = MAP_TILE_PROVIDERS.get(self.map_provider_var.get(), MAP_TILE_PROVIDERS["Vector Light"])
+        self.map_provider_label_var.set(provider["description"])
+        if self.map_widget is not None:
+            self.map_widget.set_tile_server(provider["url"], max_zoom=provider["max_zoom"])
 
     def clear(self) -> None:
         self.source_data = None
@@ -1927,7 +1959,8 @@ class MapPreviewFrame(ttk.Frame):
             path = [(point["lat"], point["lng"]) for point in line]
             if len(path) >= 2:
                 positions.extend(path)
-                self.map_widget.set_path(path, color="#00d4ff", width=3)
+                for segment in self._split_antimeridian_path(path):
+                    self.map_widget.set_path(segment, color="#00d4ff", width=3)
 
         for route_index, route in enumerate(routes, start=1):
             route_points = route.get("points", [])
@@ -1945,17 +1978,44 @@ class MapPreviewFrame(ttk.Frame):
         speeds = [point.get("speed") for point in route_points if point.get("speed") is not None]
         if not speeds:
             path = [(point["lat"], point["lng"]) for point in route_points]
-            self.map_widget.set_path(path, color="#00d4ff", width=4)
+            for segment in self._split_antimeridian_path(path):
+                self.map_widget.set_path(segment, color="#00d4ff", width=4)
             return
 
         for start, end in zip(route_points, route_points[1:]):
             speed = end.get("speed") if end.get("speed") is not None else start.get("speed")
             color = self._speed_color(speed)
-            self.map_widget.set_path(
-                [(start["lat"], start["lng"]), (end["lat"], end["lng"])],
-                color=color,
-                width=4,
-            )
+            path = [(start["lat"], start["lng"]), (end["lat"], end["lng"])]
+            for segment in self._split_antimeridian_path(path):
+                self.map_widget.set_path(segment, color=color, width=4)
+
+    def _split_antimeridian_path(self, path: List[Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
+        if len(path) < 2:
+            return []
+        segments: List[List[Tuple[float, float]]] = [[path[0]]]
+        for start, end in zip(path, path[1:]):
+            start_lat, start_lng = start
+            end_lat, end_lng = end
+            delta = end_lng - start_lng
+            if abs(delta) <= 180:
+                segments[-1].append(end)
+                continue
+
+            if start_lng > 0 > end_lng:
+                adjusted_end_lng = end_lng + 360
+                fraction = (180 - start_lng) / (adjusted_end_lng - start_lng)
+                crossing_lat = start_lat + (end_lat - start_lat) * fraction
+                segments[-1].append((crossing_lat, 180))
+                segments.append([(crossing_lat, -180), end])
+            elif start_lng < 0 < end_lng:
+                adjusted_end_lng = end_lng - 360
+                fraction = (-180 - start_lng) / (adjusted_end_lng - start_lng)
+                crossing_lat = start_lat + (end_lat - start_lat) * fraction
+                segments[-1].append((crossing_lat, -180))
+                segments.append([(crossing_lat, 180), end])
+            else:
+                segments[-1].append(end)
+        return [segment for segment in segments if len(segment) >= 2]
 
     def _render_route_nodes(self, route_index: int, route_points: List[Dict[str, Any]]) -> None:
         max_nodes = 200
@@ -2001,12 +2061,53 @@ class MapPreviewFrame(ttk.Frame):
         lats = [lat for lat, _lng in positions]
         lngs = [lng for _lat, lng in positions]
         center_lat = (min(lats) + max(lats)) / 2
-        center_lng = (min(lngs) + max(lngs)) / 2
+        center_lng, west_lng, east_lng, crosses_antimeridian = self._longitude_window(lngs)
         try:
-            self.map_widget.fit_bounding_box((max(lats), min(lngs)), (min(lats), max(lngs)))
+            if crosses_antimeridian:
+                self.map_widget.set_position(center_lat, center_lng)
+                self.map_widget.set_zoom(self._zoom_for_span(max(lats) - min(lats), east_lng - west_lng))
+            else:
+                self.map_widget.fit_bounding_box((max(lats), west_lng), (min(lats), east_lng))
         except Exception:
             self.map_widget.set_position(center_lat, center_lng)
             self.map_widget.set_zoom(4 if len(positions) > 1 else 9)
+
+    def _longitude_window(self, lngs: List[float]) -> Tuple[float, float, float, bool]:
+        if len(lngs) == 1:
+            lng = self._normalize_lng(lngs[0])
+            return lng, lng, lng, False
+
+        sorted_lngs = sorted(self._normalize_lng(lng) for lng in lngs)
+        gaps = []
+        for index, lng in enumerate(sorted_lngs):
+            next_lng = sorted_lngs[(index + 1) % len(sorted_lngs)]
+            if index == len(sorted_lngs) - 1:
+                next_lng += 360
+            gaps.append((next_lng - lng, index))
+        largest_gap, largest_gap_index = max(gaps)
+        west_index = (largest_gap_index + 1) % len(sorted_lngs)
+        west = sorted_lngs[west_index]
+        east = sorted_lngs[largest_gap_index]
+        if east < west:
+            east += 360
+        center = self._normalize_lng((west + east) / 2)
+        return center, west, east, west > 180 or east > 180
+
+    def _normalize_lng(self, lng: float) -> float:
+        normalized = ((lng + 180) % 360) - 180
+        return 180 if normalized == -180 and lng > 0 else normalized
+
+    def _zoom_for_span(self, lat_span: float, lng_span: float) -> int:
+        span = max(lat_span, lng_span)
+        if span <= 2:
+            return 6
+        if span <= 8:
+            return 5
+        if span <= 25:
+            return 4
+        if span <= 70:
+            return 3
+        return 2
 
 
 class AbbApiGui(tk.Tk):
