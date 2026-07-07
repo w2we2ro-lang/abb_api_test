@@ -1830,7 +1830,8 @@ class MapPreviewFrame(ttk.Frame):
                 props = item.get("properties", {}) if isinstance(item, dict) and isinstance(item.get("properties"), dict) else {}
                 item_name = item.get("name") if isinstance(item, dict) else None
                 point_label = str(props.get("name") or item_name or f"WP {index}")
-                route_points.append({**point, "label": point_label, "speed": extract_speed(item) or parent_speed})
+                point_speed = extract_speed(item)
+                route_points.append({**point, "label": point_label, "speed": point_speed if point_speed is not None else parent_speed})
             if len(route_points) < 2:
                 return False
             stats["route_nodes_found"] += len(route_points)
