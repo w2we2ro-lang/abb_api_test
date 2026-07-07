@@ -1596,6 +1596,14 @@ class MapPreviewFrame(ttk.Frame):
                 return None
             return {"lat": float(lat), "lng": float(lon)}
 
+        def feature_point(value: Any) -> Optional[Dict[str, float]]:
+            if not isinstance(value, dict):
+                return None
+            geometry = value.get("geometry")
+            if not isinstance(geometry, dict) or geometry.get("type") != "Point":
+                return None
+            return coord_pair(geometry.get("coordinates"))
+
         def add_point(point: Dict[str, float], label: str) -> None:
             stats["points_found"] += 1
             key = (round(point["lat"], 7), round(point["lng"], 7), label)
@@ -1622,11 +1630,31 @@ class MapPreviewFrame(ttk.Frame):
                 seen_lines.add(key)
                 lines.append(line)
 
+        def add_feature_point_line(features: Any) -> None:
+            if not isinstance(features, list):
+                return
+            line = [point for item in features if (point := feature_point(item))]
+            if len(line) < 2:
+                return
+            if len(line) > max_line_points:
+                step = max(1, len(line) // max_line_points)
+                line = line[::step][:max_line_points]
+                stats["line_points_trimmed"] += 1
+            key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in line)
+            if key not in seen_lines:
+                seen_lines.add(key)
+                lines.append(line)
+
         def visit(obj: Any, label: str = "Point") -> None:
             if isinstance(obj, dict):
                 geom = obj.get("geometry") if isinstance(obj.get("geometry"), dict) else obj
                 geom_type = geom.get("type") if isinstance(geom, dict) else None
                 coords = geom.get("coordinates") if isinstance(geom, dict) else None
+
+                # ABB Path/Route responses return route geometry as paths[].points[] or routes[].points[],
+                # where each item is a GeoJSON Point feature. Connect those points into a route line.
+                if isinstance(obj.get("points"), list):
+                    add_feature_point_line(obj["points"])
 
                 if geom_type == "Point":
                     point = coord_pair(coords)
