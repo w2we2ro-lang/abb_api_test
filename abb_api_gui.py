@@ -1492,6 +1492,7 @@ class MapPreviewFrame(ttk.Frame):
     def show_map_preview(self) -> None:
         try:
             data = self.source_data if self.source_data is not None else json.loads(self.source_text.get("1.0", tk.END).strip())
+            data = self._expand_download_urls(data)
             max_markers = self._get_max_markers()
             points, lines = self._extract_map_data(data, max_points=max_markers)
             if not points and not lines:
@@ -1505,6 +1506,52 @@ class MapPreviewFrame(ttk.Frame):
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("Map Preview Error", str(exc))
+
+    def _expand_download_urls(self, data: Any, max_downloads: int = 5) -> Any:
+        urls = self._find_download_urls(data)
+        if not urls:
+            return data
+
+        downloaded = []
+        for index, url in enumerate(urls[:max_downloads], start=1):
+            try:
+                self._log(f"Fetching route response JSON {index}/{min(len(urls), max_downloads)}...")
+                resp = requests.get(url, timeout=60)
+                self._log(f"Route response HTTP {resp.status_code}")
+                resp.raise_for_status()
+                downloaded.append(resp.json())
+            except Exception as exc:
+                self._log(f"Route response download failed: {exc}")
+
+        if not downloaded:
+            return data
+
+        if isinstance(data, dict):
+            expanded = dict(data)
+            expanded["downloadedResponses"] = downloaded
+            self.source_data = expanded
+            return expanded
+        return {"source": data, "downloadedResponses": downloaded}
+
+    def _find_download_urls(self, data: Any) -> List[str]:
+        urls: List[str] = []
+        seen = set()
+
+        def visit(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key in {"downloadUrl", "responseUrl"} and isinstance(value, str) and value.startswith(("http://", "https://")):
+                        if value not in seen:
+                            seen.add(value)
+                            urls.append(value)
+                    else:
+                        visit(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+
+        visit(data)
+        return urls
 
     def _active_api_frame(self) -> Optional[tk.Misc]:
         root = self.winfo_toplevel()
