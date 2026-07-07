@@ -752,12 +752,18 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 self.log("WebSocket connected. Sending request...")
                 ws.send(json.dumps(payload))
                 self.log("Request sent. Waiting for response...")
+                ws_messages = []
 
                 while True:
                     msg = ws.recv()
                     self.log("WebSocket message received:")
                     try:
                         parsed = json.loads(msg)
+                        ws_messages.append(parsed)
+                        self.latest_response_data = {
+                            "webSocketMessages": ws_messages,
+                            "latestMessage": parsed,
+                        }
                         self.log(json.dumps(parsed, indent=2)[:20000])
                         status = str(parsed.get("status", "")).lower()
                         if status in {"finished", "failed", "success", "completed"}:
@@ -1336,10 +1342,19 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
                         timeout=30,
                     )
                     self.log("WebSocket connected. Waiting for product notifications...")
+                    ws_messages = []
                     while not self.stop_ws.is_set():
                         msg = self.ws.recv()
                         try:
-                            self.log(json.dumps(json.loads(msg), indent=2)[:50000])
+                            parsed = json.loads(msg)
+                            ws_messages.append(parsed)
+                            if len(ws_messages) > 100:
+                                ws_messages = ws_messages[-100:]
+                            self.latest_response_data = {
+                                "webSocketMessages": ws_messages,
+                                "latestMessage": parsed,
+                            }
+                            self.log(json.dumps(parsed, indent=2)[:50000])
                         except json.JSONDecodeError:
                             self.log(str(msg)[:50000])
                 except Exception as exc:
