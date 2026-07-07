@@ -232,7 +232,6 @@ VESSEL_SAMPLE_PARAMETERS = {
             {"speed": 10, "maxContinuousRating": 0.9},
         ],
     },
-    "customModel": None,
     "safetyMargins": {"port": 0, "starboard": 0, "underKeel": 0, "air": 0, "aft": 0, "forward": 0},
     "cii": {"yearToDateDistance": 10, "yearToDateCo2Emissions": 0},
 }
@@ -258,22 +257,6 @@ VESSEL_SAMPLE_CONFIG = {
     "groundingCheckMode": "Off",
 }
 
-VESSEL_SAMPLE_RESTRICTIONS = {
-    "conditionalAreas": {
-        "defaultAreas": ["SpeedLimit", "EmissionControl"],
-        "areaOverrides": [{"enabled": True, "areaId": "nogo-4"}],
-    },
-    "weatherLimits": [
-        {
-            "name": "HurricaneDistance",
-            "minimum": 500,
-            "action": {"actionType": "Warn", "warningSeverity": "Moderate"},
-        }
-    ],
-}
-
-VESSEL_SAMPLE_WEATHER_SOURCE = {"type": "Forecast", "version": "2026-07-06T00:00:00Z"}
-
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
     "Instructed set speed": {
@@ -282,12 +265,8 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "voyage": VESSEL_SAMPLE_VOYAGE,
         "etd": "2026-07-06T19:20:30Z",
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
-        "costs": None,
-        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
-        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
         "config": VESSEL_SAMPLE_CONFIG,
         "speed": 10,
-        "optimizationType": "Fuel",
     },
     "Recommended set speed": {
         "id": "recommended-speed-1",
@@ -295,13 +274,8 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "voyage": VESSEL_SAMPLE_VOYAGE,
         "etd": "2026-07-06T19:20:30Z",
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
-        "costs": None,
-        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
-        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
         "config": VESSEL_SAMPLE_CONFIG,
         "speeds": [{"minimum": 8, "maximum": 12}],
-        "optimizationType": "Fuel",
-        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Fixed ETA": {
         "id": "fixed-eta-1",
@@ -310,13 +284,8 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "etd": "2026-07-06T19:20:30Z",
         "eta": "2026-07-12T12:00:00Z",
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
-        "costs": None,
-        "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
-        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
         "config": VESSEL_SAMPLE_CONFIG,
         "speeds": [{"minimum": 8, "maximum": 12}],
-        "optimizationType": "Fuel",
-        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Optimal set speed": {
         "id": "optimal-speed-1",
@@ -324,13 +293,10 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "voyage": VESSEL_SAMPLE_VOYAGE,
         "etd": "2026-07-06T19:20:30Z",
         "vesselParameters": VESSEL_SAMPLE_PARAMETERS,
-        "costs": None,
         "costsAndFuelInfo": VESSEL_SAMPLE_COSTS_AND_FUEL,
-        "weatherSource": VESSEL_SAMPLE_WEATHER_SOURCE,
         "config": {**VESSEL_SAMPLE_CONFIG, "minimumHoursBetweenSpeedChanges": 24},
         "speeds": [{"minimum": 8, "maximum": 12}],
         "optimizationType": "Time",
-        "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
 }
 
