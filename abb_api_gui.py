@@ -202,7 +202,6 @@ VESSEL_SAMPLE_WEATHER_SOURCE = {"type": "Forecast", "version": "2026-07-06T00:00
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
     "Instructed set speed": {
-        "type": "InstructedSetSpeed",
         "id": "instructed-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
         "voyage": VESSEL_SAMPLE_VOYAGE,
@@ -216,7 +215,6 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "optimizationType": "Fuel",
     },
     "Recommended set speed": {
-        "type": "RecommendedSetSpeed",
         "id": "recommended-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
         "voyage": VESSEL_SAMPLE_VOYAGE,
@@ -231,7 +229,6 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Fixed ETA": {
-        "type": "FixedETA",
         "id": "fixed-eta-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
         "voyage": VESSEL_SAMPLE_VOYAGE,
@@ -247,7 +244,6 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
     "Optimal set speed": {
-        "type": "OptimalSetSpeed",
         "id": "optimal-speed-1",
         "points": DEFAULT_SHORTEST_PATH_REQUEST["points"],
         "voyage": VESSEL_SAMPLE_VOYAGE,
