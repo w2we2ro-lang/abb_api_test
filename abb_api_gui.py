@@ -14,13 +14,12 @@ Run:
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
-import tempfile
 import threading
 import time
 import tkinter as tk
-import webbrowser
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,16 +28,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import websocket
-
-try:
-    import tkintermapview
-except ImportError:
-    tkintermapview = None
-
-try:
-    import webview
-except ImportError:
-    webview = None
 
 
 def _load_local_defaults() -> Dict[str, str]:
@@ -309,24 +298,6 @@ RTZ_REQUEST_TYPES = {
     "Recommended Speed Request": "Recommended set speed",
     "Fixed ETA Request": "Fixed ETA",
     "Optimal Speed Request": "Optimal set speed",
-}
-
-MAP_TILE_PROVIDERS = {
-    "Vector Light": {
-        "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        "max_zoom": 19,
-        "description": "OpenStreetMap vector-style map (no API key)",
-    },
-    "Vector Street": {
-        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-        "max_zoom": 19,
-        "description": "Esri World Street Map (no API key)",
-    },
-    "Satellite": {
-        "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        "max_zoom": 19,
-        "description": "Esri World Imagery satellite map (no API key)",
-    },
 }
 
 VOYAGE_ENDPOINTS = {
@@ -1594,6 +1565,265 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
             self.ws = None
 
 
+class GlobeCanvas(tk.Canvas):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master, background="#07111f", highlightthickness=0)
+        self.points: List[Dict[str, Any]] = []
+        self.lines: List[List[Dict[str, float]]] = []
+        self.routes: List[Dict[str, Any]] = []
+        self.yaw = math.radians(-25)
+        self.pitch = math.radians(12)
+        self.zoom = 1.0
+        self._drag_start: Optional[Tuple[int, int, float, float]] = None
+        self._cx = 0.0
+        self._cy = 0.0
+        self._radius = 1.0
+
+        self.bind("<Configure>", lambda _event: self.redraw())
+        self.bind("<ButtonPress-1>", self._start_drag)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<MouseWheel>", self._wheel)
+        self.bind("<Button-4>", lambda _event: self._zoom_by(1.12))
+        self.bind("<Button-5>", lambda _event: self._zoom_by(1 / 1.12))
+
+    def render_map_data(
+        self,
+        points: List[Dict[str, Any]],
+        lines: List[List[Dict[str, float]]],
+        routes: List[Dict[str, Any]],
+    ) -> None:
+        self.points = list(points)
+        self.lines = list(lines)
+        self.routes = list(routes)
+        self.redraw()
+
+    def clear_globe(self) -> None:
+        self.points = []
+        self.lines = []
+        self.routes = []
+        self.redraw()
+
+    def reset_view(self) -> None:
+        self.yaw = math.radians(-25)
+        self.pitch = math.radians(12)
+        self.zoom = 1.0
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 1)
+        height = max(self.winfo_height(), 1)
+        self._cx = width / 2
+        self._cy = height / 2
+        self._radius = max(80.0, min(width, height) * 0.43 * self.zoom)
+
+        self.create_rectangle(0, 0, width, height, fill="#07111f", outline="")
+        self.create_oval(
+            self._cx - self._radius,
+            self._cy - self._radius,
+            self._cx + self._radius,
+            self._cy + self._radius,
+            fill="#0f2742",
+            outline="#38bdf8",
+            width=2,
+        )
+        self._draw_graticule()
+        self._draw_lines()
+        self._draw_routes()
+        self._draw_points()
+        self._draw_overlay(width, height)
+
+    def _start_drag(self, event: tk.Event) -> None:
+        self._drag_start = (int(event.x), int(event.y), self.yaw, self.pitch)
+
+    def _drag(self, event: tk.Event) -> None:
+        if self._drag_start is None:
+            return
+        start_x, start_y, start_yaw, start_pitch = self._drag_start
+        self.yaw = start_yaw + (int(event.x) - start_x) * 0.01
+        self.pitch = max(math.radians(-75), min(math.radians(75), start_pitch + (int(event.y) - start_y) * 0.01))
+        self.redraw()
+
+    def _wheel(self, event: tk.Event) -> None:
+        self._zoom_by(1.12 if int(event.delta) > 0 else 1 / 1.12)
+
+    def _zoom_by(self, factor: float) -> None:
+        self.zoom = max(0.55, min(2.4, self.zoom * factor))
+        self.redraw()
+
+    def _draw_graticule(self) -> None:
+        for lng in range(-180, 181, 30):
+            path = [{"lat": lat, "lng": lng} for lat in range(-90, 91, 5)]
+            self._draw_geo_path(path, "#1d4ed8", 1, samples_per_segment=1)
+        for lat in range(-60, 61, 30):
+            path = [{"lat": lat, "lng": lng} for lng in range(-180, 181, 5)]
+            self._draw_geo_path(path, "#334155", 1, samples_per_segment=1)
+
+    def _draw_lines(self) -> None:
+        for line in self.lines:
+            self._draw_geo_path(line, "#00d4ff", 2)
+
+    def _draw_routes(self) -> None:
+        for route_index, route in enumerate(self.routes, start=1):
+            route_points = route.get("points", [])
+            if len(route_points) < 2:
+                continue
+            has_speed = any(isinstance(point.get("speed"), (int, float)) for point in route_points)
+            if has_speed:
+                for start, end in zip(route_points, route_points[1:]):
+                    speed = end.get("speed") if isinstance(end.get("speed"), (int, float)) else start.get("speed")
+                    self._draw_geo_path([start, end], self._speed_color(speed), 3)
+            else:
+                self._draw_geo_path(route_points, "#00d4ff", 3)
+            self._draw_route_nodes(route_index, route_points)
+
+    def _draw_points(self) -> None:
+        label_limit = 80
+        for index, point in enumerate(self.points, start=1):
+            label = str(point.get("label") or f"Port {index}")
+            self._draw_marker(point, "#38bdf8", 5, label if index <= label_limit else "")
+
+    def _draw_route_nodes(self, route_index: int, route_points: List[Dict[str, Any]]) -> None:
+        max_nodes = 260
+        step = max(1, len(route_points) // max_nodes)
+        last_index = len(route_points) - 1
+        for index, point in enumerate(route_points):
+            endpoint = index in {0, last_index}
+            if not endpoint and index % step != 0:
+                continue
+            if index == 0:
+                label = f"R{route_index} START"
+                color = "#f8fafc"
+                radius = 6
+            elif index == last_index:
+                label = f"R{route_index} END"
+                color = "#f8fafc"
+                radius = 6
+            else:
+                label = f"WP {index + 1}" if len(route_points) <= 80 else ""
+                color = "#94a3b8"
+                radius = 3
+            self._draw_marker(point, color, radius, label)
+
+    def _draw_geo_path(
+        self,
+        path: List[Dict[str, Any]],
+        color: str,
+        width: int,
+        samples_per_segment: Optional[int] = None,
+    ) -> None:
+        if len(path) < 2:
+            return
+        if samples_per_segment is None:
+            samples_per_segment = 24 if len(path) <= 10 else 1
+
+        for start, end in zip(path, path[1:]):
+            start_vec = self._latlng_to_vector(float(start["lat"]), float(start["lng"]))
+            end_vec = self._latlng_to_vector(float(end["lat"]), float(end["lng"]))
+            last_xy: Optional[Tuple[float, float]] = None
+            for index in range(samples_per_segment + 1):
+                point_vec = self._slerp(start_vec, end_vec, index / samples_per_segment)
+                xy = self._project_vector(point_vec)
+                if xy is None:
+                    last_xy = None
+                    continue
+                if last_xy is not None:
+                    self.create_line(last_xy[0], last_xy[1], xy[0], xy[1], fill=color, width=width, smooth=True)
+                last_xy = xy
+
+    def _draw_marker(self, point: Dict[str, Any], color: str, radius: int, label: str = "") -> None:
+        xy = self._project_latlng(float(point["lat"]), float(point["lng"]))
+        if xy is None:
+            return
+        x, y = xy
+        self.create_oval(x - radius, y - radius, x + radius, y + radius, fill=color, outline="#0f172a", width=1)
+        if label:
+            self.create_text(
+                x + radius + 4,
+                y - radius - 2,
+                anchor="w",
+                text=label[:36],
+                fill="#e2e8f0",
+                font=("Segoe UI", 8),
+            )
+
+    def _draw_overlay(self, width: int, height: int) -> None:
+        route_nodes = sum(len(route.get("points", [])) for route in self.routes)
+        summary = f"3D Globe  Ports {len(self.points)}  Lines {len(self.lines)}  Routes {len(self.routes)}  Nodes {route_nodes}"
+        self.create_text(14, 12, anchor="nw", text=summary, fill="#e2e8f0", font=("Segoe UI", 9, "bold"))
+        legend = [
+            ("< 8 kn", "#2563eb"),
+            ("8-12 kn", "#16a34a"),
+            ("12-16 kn", "#f59e0b"),
+            (">= 16 kn", "#dc2626"),
+            ("no speed", "#00d4ff"),
+        ]
+        x = 14
+        y = max(42, height - 22)
+        for label, color in legend:
+            self.create_line(x, y, x + 22, y, fill=color, width=4)
+            self.create_text(x + 28, y, anchor="w", text=label, fill="#cbd5e1", font=("Segoe UI", 8))
+            x += 86
+
+    def _project_latlng(self, lat: float, lng: float) -> Optional[Tuple[float, float]]:
+        return self._project_vector(self._latlng_to_vector(lat, lng))
+
+    def _project_vector(self, vector: Tuple[float, float, float]) -> Optional[Tuple[float, float]]:
+        x, y, z = vector
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+        x1 = x * cos_yaw + z * sin_yaw
+        z1 = -x * sin_yaw + z * cos_yaw
+
+        cos_pitch = math.cos(self.pitch)
+        sin_pitch = math.sin(self.pitch)
+        y2 = y * cos_pitch - z1 * sin_pitch
+        z2 = y * sin_pitch + z1 * cos_pitch
+        if z2 <= 0:
+            return None
+        return self._cx + self._radius * x1, self._cy - self._radius * y2
+
+    def _latlng_to_vector(self, lat: float, lng: float) -> Tuple[float, float, float]:
+        lat_rad = math.radians(lat)
+        lng_rad = math.radians(lng)
+        cos_lat = math.cos(lat_rad)
+        return (cos_lat * math.sin(lng_rad), math.sin(lat_rad), cos_lat * math.cos(lng_rad))
+
+    def _slerp(
+        self,
+        start: Tuple[float, float, float],
+        end: Tuple[float, float, float],
+        fraction: float,
+    ) -> Tuple[float, float, float]:
+        dot = max(-1.0, min(1.0, sum(a * b for a, b in zip(start, end))))
+        if dot > 0.9995 or dot < -0.9995:
+            return self._normalize(tuple(start[i] + (end[i] - start[i]) * fraction for i in range(3)))
+        omega = math.acos(dot)
+        sin_omega = math.sin(omega)
+        if abs(sin_omega) < 1e-8:
+            return start
+        start_scale = math.sin((1 - fraction) * omega) / sin_omega
+        end_scale = math.sin(fraction * omega) / sin_omega
+        return tuple(start[i] * start_scale + end[i] * end_scale for i in range(3))
+
+    def _normalize(self, vector: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        length = math.sqrt(sum(value * value for value in vector))
+        if length <= 1e-9:
+            return (0.0, 0.0, 1.0)
+        return tuple(value / length for value in vector)
+
+    def _speed_color(self, speed: Any) -> str:
+        if not isinstance(speed, (int, float)):
+            return "#00d4ff"
+        if speed < 8:
+            return "#2563eb"
+        if speed < 12:
+            return "#16a34a"
+        if speed < 16:
+            return "#f59e0b"
+        return "#dc2626"
+
+
 class MapPreviewFrame(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, padding=10)
@@ -1602,30 +1832,16 @@ class MapPreviewFrame(ttk.Frame):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        controls = ttk.LabelFrame(self, text="Embedded Vector Map Preview")
+        controls = ttk.LabelFrame(self, text="In-App 3D Globe Preview")
         controls.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(controls, text="Provider").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.map_provider_var = tk.StringVar(value="Vector Light")
-        provider_box = ttk.Combobox(
-            controls,
-            textvariable=self.map_provider_var,
-            values=list(MAP_TILE_PROVIDERS.keys()),
-            state="readonly",
-            width=18,
-        )
-        provider_box.grid(row=0, column=1, sticky="w", padx=5, pady=5)
-        provider_box.bind("<<ComboboxSelected>>", lambda _event: self.apply_map_provider())
-        self.map_provider_label_var = tk.StringVar(value=MAP_TILE_PROVIDERS["Vector Light"]["description"])
-        ttk.Label(controls, textvariable=self.map_provider_label_var).grid(row=0, column=2, sticky="w", padx=5, pady=5)
-        ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=3, padx=5, pady=5)
-        ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=4, padx=5, pady=5)
-        ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=5, padx=5, pady=5)
-        ttk.Button(controls, text="Open 3D Globe", command=self.show_globe_preview).grid(row=0, column=6, padx=5, pady=5)
-        ttk.Label(controls, text="Max markers").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=0, padx=5, pady=5)
+        ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=2, padx=5, pady=5)
+        ttk.Label(controls, text="Max markers").grid(row=0, column=3, sticky="e", padx=5, pady=5)
         self.max_markers_var = tk.StringVar(value="1000")
-        ttk.Spinbox(controls, textvariable=self.max_markers_var, from_=100, to=20000, increment=100, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=5)
-        controls.columnconfigure(1, weight=1)
+        ttk.Spinbox(controls, textvariable=self.max_markers_var, from_=100, to=20000, increment=100, width=10).grid(row=0, column=4, sticky="w", padx=5, pady=5)
+        controls.columnconfigure(5, weight=1)
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main.pack(fill=tk.BOTH, expand=True)
@@ -1638,20 +1854,10 @@ class MapPreviewFrame(ttk.Frame):
         self.source_text = scrolledtext.ScrolledText(source_frame, wrap=tk.NONE)
         self.source_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        map_frame = ttk.LabelFrame(right_frame, text="Vector Map")
+        map_frame = ttk.LabelFrame(right_frame, text="3D Globe")
         map_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        self.map_widget = None
-        if tkintermapview is None:
-            ttk.Label(
-                map_frame,
-                text="Install tkintermapview from requirements_abb_gui.txt to show the embedded map.",
-            ).pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
-        else:
-            self.map_widget = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
-            self.map_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            self.apply_map_provider()
-            self.map_widget.set_position(29.7262421, -95.2641144)
-            self.map_widget.set_zoom(3)
+        self.globe_widget = GlobeCanvas(map_frame)
+        self.globe_widget.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         result_frame = ttk.LabelFrame(right_frame, text="Extracted Map Data / Log")
         result_frame.pack(fill=tk.BOTH, expand=False)
@@ -1661,27 +1867,16 @@ class MapPreviewFrame(ttk.Frame):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear", command=self.clear).pack(side=tk.LEFT)
-        ttk.Button(bottom, text="Reset Map", command=self.reset_map).pack(side=tk.LEFT, padx=5)
-
-    def apply_map_provider(self) -> None:
-        provider = MAP_TILE_PROVIDERS.get(self.map_provider_var.get(), MAP_TILE_PROVIDERS["Vector Light"])
-        self.map_provider_label_var.set(provider["description"])
-        if self.map_widget is not None:
-            self.map_widget.set_tile_server(provider["url"], max_zoom=provider["max_zoom"])
+        ttk.Button(bottom, text="Reset Globe", command=self.reset_map).pack(side=tk.LEFT, padx=5)
 
     def clear(self) -> None:
         self.source_data = None
         self.source_text.delete("1.0", tk.END)
         self.result_text.delete("1.0", tk.END)
-        self.reset_map()
+        self.globe_widget.clear_globe()
 
     def reset_map(self) -> None:
-        if self.map_widget is None:
-            return
-        self.map_widget.delete_all_marker()
-        self.map_widget.delete_all_path()
-        self.map_widget.set_position(29.7262421, -95.2641144)
-        self.map_widget.set_zoom(3)
+        self.globe_widget.reset_view()
 
     def load_active_request(self) -> None:
         frame = self._active_api_frame()
@@ -1711,7 +1906,7 @@ class MapPreviewFrame(ttk.Frame):
             points, lines, routes = self._extract_map_data(data, max_points=max_markers)
             if not points and not lines and not routes:
                 raise ValueError("No longitude/latitude coordinates were found.")
-            self._render_embedded_map(points, lines, routes)
+            self._render_in_app_globe(points, lines, routes)
             stats = self._last_extract_stats
             self._log(f"Points rendered: {len(points)} / found: {stats.get('points_found', len(points))}")
             if stats.get("points_sampled", 0):
@@ -1721,36 +1916,6 @@ class MapPreviewFrame(ttk.Frame):
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("Map Preview Error", str(exc))
-
-    def show_globe_preview(self) -> None:
-        try:
-            data = self.source_data if self.source_data is not None else json.loads(self.source_text.get("1.0", tk.END).strip())
-            data = self._expand_download_urls(data)
-            max_markers = self._get_max_markers()
-            points, lines, routes = self._extract_map_data(data, max_points=max_markers, max_line_points=20000)
-            if not points and not lines and not routes:
-                raise ValueError("No longitude/latitude coordinates were found.")
-            html_path = self._write_globe_html(points, lines, routes)
-            self._open_globe_preview(html_path)
-        except Exception as exc:
-            self._log(f"ERROR: {exc}")
-            messagebox.showerror("3D Globe Error", str(exc))
-
-    def _open_globe_preview(self, html_path: Path) -> None:
-        if webview is None:
-            webbrowser.open(html_path.as_uri())
-            self._log(f"3D globe opened in browser fallback: {html_path}")
-            return
-
-        def worker() -> None:
-            try:
-                webview.create_window("ABB 3D Globe Preview", html_path.as_uri(), width=1280, height=820)
-                webview.start()
-            except Exception:
-                webbrowser.open(html_path.as_uri())
-
-        threading.Thread(target=worker, daemon=True).start()
-        self._log(f"3D globe opened in app window: {html_path}")
 
     def _expand_download_urls(self, data: Any, max_downloads: int = 5) -> Any:
         urls = self._find_download_urls(data)
@@ -1931,6 +2096,12 @@ class MapPreviewFrame(ttk.Frame):
                 step = max(1, len(route_points) // max_line_points)
                 route_points = route_points[::step][:max_line_points]
                 stats["line_points_trimmed"] += 1
+            if len(route_points) <= 10:
+                for route_point in route_points:
+                    add_point(
+                        {"lat": route_point["lat"], "lng": route_point["lng"]},
+                        str(route_point.get("label") or label),
+                    )
             key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in route_points)
             if key in seen_routes:
                 return True
@@ -1996,331 +2167,17 @@ class MapPreviewFrame(ttk.Frame):
         self._last_extract_stats = stats
         return points, lines, routes
 
-    def _render_embedded_map(
+    def _render_in_app_globe(
         self,
         points: List[Dict[str, Any]],
         lines: List[List[Dict[str, float]]],
         routes: List[Dict[str, Any]],
     ) -> None:
-        if self.map_widget is None:
-            raise RuntimeError("tkintermapview is not installed. Install requirements_abb_gui.txt and restart the GUI.")
-
-        self.map_widget.delete_all_marker()
-        self.map_widget.delete_all_path()
-        positions: List[Tuple[float, float]] = []
-
-        for index, point in enumerate(points, start=1):
-            lat = point["lat"]
-            lng = point["lng"]
-            positions.append((lat, lng))
-            self.map_widget.set_marker(lat, lng, text=f"{index}. {point.get('label', 'Point')}")
-
-        for line in lines:
-            path = [(point["lat"], point["lng"]) for point in line]
-            if len(path) >= 2:
-                positions.extend(path)
-                for segment in self._split_antimeridian_path(path):
-                    self.map_widget.set_path(segment, color="#00d4ff", width=3)
-
+        self.globe_widget.render_map_data(points, lines, routes)
         for route_index, route in enumerate(routes, start=1):
             route_points = route.get("points", [])
-            if len(route_points) < 2:
-                continue
-            positions.extend((point["lat"], point["lng"]) for point in route_points)
-            self._render_route_path(route_points)
-            self._render_route_nodes(route_index, route_points)
-            self._log_speed_profile(route_index, str(route.get("label") or "Route"), route_points)
-
-        if positions:
-            self._fit_positions(positions)
-
-    def _write_globe_html(
-        self,
-        points: List[Dict[str, Any]],
-        lines: List[List[Dict[str, float]]],
-        routes: List[Dict[str, Any]],
-    ) -> Path:
-        payload = {"points": points, "lines": lines, "routes": routes}
-        payload_json = json.dumps(payload)
-        html = self._globe_html_template().replace("__MAP_PAYLOAD__", payload_json)
-        output_path = Path(tempfile.gettempdir()) / "abb_api_3d_globe_preview.html"
-        output_path.write_text(html, encoding="utf-8")
-        return output_path
-
-    def _globe_html_template(self) -> str:
-        return """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>ABB API 3D Globe Preview</title>
-  <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
-  <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
-  <style>
-    html, body, #cesiumContainer {
-      width: 100%;
-      height: 100%;
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      font-family: Arial, sans-serif;
-    }
-    .panel {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 10;
-      width: 280px;
-      background: rgba(18, 24, 38, 0.86);
-      color: #f8fafc;
-      border: 1px solid rgba(148, 163, 184, 0.45);
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-size: 12px;
-      line-height: 1.45;
-      box-shadow: 0 8px 28px rgba(15, 23, 42, 0.35);
-    }
-    .title {
-      font-size: 14px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-    .legend {
-      display: grid;
-      grid-template-columns: 14px 1fr;
-      gap: 5px 7px;
-      margin-top: 8px;
-      align-items: center;
-    }
-    .swatch {
-      width: 14px;
-      height: 5px;
-      border-radius: 999px;
-    }
-  </style>
-</head>
-<body>
-  <div id="cesiumContainer"></div>
-  <div class="panel">
-    <div class="title">3D Globe Route Preview</div>
-    <div id="summary">Loading route data...</div>
-    <div class="legend">
-      <span class="swatch" style="background:#2563eb"></span><span>&lt; 8 kn</span>
-      <span class="swatch" style="background:#16a34a"></span><span>8 - 12 kn</span>
-      <span class="swatch" style="background:#f59e0b"></span><span>12 - 16 kn</span>
-      <span class="swatch" style="background:#dc2626"></span><span>&gt;= 16 kn</span>
-      <span class="swatch" style="background:#00d4ff"></span><span>no speed value</span>
-    </div>
-  </div>
-  <script>
-    const payload = __MAP_PAYLOAD__;
-    const viewer = new Cesium.Viewer("cesiumContainer", {
-      animation: false,
-      baseLayerPicker: false,
-      fullscreenButton: true,
-      geocoder: false,
-      homeButton: true,
-      infoBox: true,
-      sceneModePicker: true,
-      selectionIndicator: true,
-      timeline: false,
-      navigationHelpButton: true,
-      imageryProvider: new Cesium.UrlTemplateImageryProvider({
-        url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        maximumLevel: 19,
-        credit: "OpenStreetMap"
-      })
-    });
-    viewer.scene.globe.enableLighting = false;
-    viewer.scene.screenSpaceCameraController.enableTilt = true;
-    viewer.scene.screenSpaceCameraController.enableRotate = true;
-
-    const entities = [];
-
-    function toCartesian(point) {
-      return Cesium.Cartesian3.fromDegrees(point.lng, point.lat, point.height || 0);
-    }
-
-    function speedColor(speed) {
-      if (typeof speed !== "number") return "#00d4ff";
-      if (speed < 8) return "#2563eb";
-      if (speed < 12) return "#16a34a";
-      if (speed < 16) return "#f59e0b";
-      return "#dc2626";
-    }
-
-    function addEntity(entity) {
-      const added = viewer.entities.add(entity);
-      entities.push(added);
-      return added;
-    }
-
-    function addMarker(point, label, color, size) {
-      addEntity({
-        name: label || "Point",
-        position: toCartesian(point),
-        point: {
-          pixelSize: size || 8,
-          color: Cesium.Color.fromCssColorString(color || "#60a5fa"),
-          outlineColor: Cesium.Color.WHITE,
-          outlineWidth: 1,
-          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
-        },
-        label: {
-          text: label || "",
-          font: "12px Arial",
-          fillColor: Cesium.Color.WHITE,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 3,
-          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-          pixelOffset: new Cesium.Cartesian2(0, -14),
-          showBackground: false,
-          scale: 0.75
-        }
-      });
-    }
-
-    function addPolyline(points, color, width, name) {
-      if (!points || points.length < 2) return;
-      addEntity({
-        name: name || "Route",
-        polyline: {
-          positions: points.map(toCartesian),
-          width: width || 3,
-          material: Cesium.Color.fromCssColorString(color || "#00d4ff"),
-          arcType: Cesium.ArcType.GEODESIC,
-          clampToGround: false
-        }
-      });
-    }
-
-    payload.points.forEach((point, index) => {
-      addMarker(point, `${index + 1}. ${point.label || "Port"}`, "#38bdf8", 9);
-    });
-
-    payload.lines.forEach((line, index) => {
-      addPolyline(line, "#00d4ff", 3, `Line ${index + 1}`);
-    });
-
-    payload.routes.forEach((route, routeIndex) => {
-      const routePoints = route.points || [];
-      const hasSpeed = routePoints.some(point => typeof point.speed === "number");
-      if (hasSpeed) {
-        for (let index = 0; index < routePoints.length - 1; index += 1) {
-          const start = routePoints[index];
-          const end = routePoints[index + 1];
-          const speed = typeof end.speed === "number" ? end.speed : start.speed;
-          addPolyline([start, end], speedColor(speed), 4, `${route.label || "Route"} segment ${index + 1}`);
-        }
-      } else {
-        addPolyline(routePoints, "#00d4ff", 4, route.label || `Route ${routeIndex + 1}`);
-      }
-
-      const step = Math.max(1, Math.floor(routePoints.length / 250));
-      routePoints.forEach((point, index) => {
-        const endpoint = index === 0 || index === routePoints.length - 1;
-        if (!endpoint && index % step !== 0) return;
-        const label = index === 0 ? `R${routeIndex + 1} START` : index === routePoints.length - 1 ? `R${routeIndex + 1} END` : "";
-        addMarker(point, label, endpoint ? "#f8fafc" : "#94a3b8", endpoint ? 10 : 4);
-      });
-    });
-
-    const speedSamples = payload.routes.flatMap(route => (route.points || []).map(point => point.speed)).filter(speed => typeof speed === "number");
-    const summary = document.getElementById("summary");
-    const pointCount = payload.points.length;
-    const lineCount = payload.lines.length;
-    const routeCount = payload.routes.length;
-    const routeNodeCount = payload.routes.reduce((sum, route) => sum + ((route.points || []).length), 0);
-    if (speedSamples.length) {
-      const min = Math.min(...speedSamples).toFixed(2);
-      const max = Math.max(...speedSamples).toFixed(2);
-      const avg = (speedSamples.reduce((sum, value) => sum + value, 0) / speedSamples.length).toFixed(2);
-      summary.textContent = `Ports ${pointCount}, lines ${lineCount}, routes ${routeCount}, route nodes ${routeNodeCount}, speed min/avg/max ${min}/${avg}/${max} kn`;
-    } else {
-      summary.textContent = `Ports ${pointCount}, lines ${lineCount}, routes ${routeCount}, route nodes ${routeNodeCount}, no speed profile values`;
-    }
-
-    if (entities.length) {
-      viewer.flyTo(entities, { duration: 1.2 });
-    } else {
-      viewer.camera.flyHome(0);
-    }
-  </script>
-</body>
-</html>
-"""
-
-    def _render_route_path(self, route_points: List[Dict[str, Any]]) -> None:
-        speeds = [point.get("speed") for point in route_points if point.get("speed") is not None]
-        if not speeds:
-            path = [(point["lat"], point["lng"]) for point in route_points]
-            for segment in self._split_antimeridian_path(path):
-                self.map_widget.set_path(segment, color="#00d4ff", width=4)
-            return
-
-        for start, end in zip(route_points, route_points[1:]):
-            speed = end.get("speed") if end.get("speed") is not None else start.get("speed")
-            color = self._speed_color(speed)
-            path = [(start["lat"], start["lng"]), (end["lat"], end["lng"])]
-            for segment in self._split_antimeridian_path(path):
-                self.map_widget.set_path(segment, color=color, width=4)
-
-    def _split_antimeridian_path(self, path: List[Tuple[float, float]]) -> List[List[Tuple[float, float]]]:
-        if len(path) < 2:
-            return []
-        segments: List[List[Tuple[float, float]]] = [[path[0]]]
-        for start, end in zip(path, path[1:]):
-            start_lat, start_lng = start
-            end_lat, end_lng = end
-            delta = end_lng - start_lng
-            if abs(delta) <= 180:
-                segments[-1].append(end)
-                continue
-
-            if start_lng > 0 > end_lng:
-                adjusted_end_lng = end_lng + 360
-                fraction = (180 - start_lng) / (adjusted_end_lng - start_lng)
-                crossing_lat = start_lat + (end_lat - start_lat) * fraction
-                segments[-1].append((crossing_lat, 180))
-                segments.append([(crossing_lat, -180), end])
-            elif start_lng < 0 < end_lng:
-                adjusted_end_lng = end_lng - 360
-                fraction = (-180 - start_lng) / (adjusted_end_lng - start_lng)
-                crossing_lat = start_lat + (end_lat - start_lat) * fraction
-                segments[-1].append((crossing_lat, -180))
-                segments.append([(crossing_lat, 180), end])
-            else:
-                segments[-1].append(end)
-        return [segment for segment in segments if len(segment) >= 2]
-
-    def _render_route_nodes(self, route_index: int, route_points: List[Dict[str, Any]]) -> None:
-        max_nodes = 200
-        step = max(1, len(route_points) // max_nodes)
-        last_index = len(route_points) - 1
-        for index, point in enumerate(route_points):
-            is_endpoint = index in {0, last_index}
-            if not is_endpoint and index % step != 0:
-                continue
-            if index == 0:
-                text = f"R{route_index} START"
-            elif index == last_index:
-                text = f"R{route_index} END"
-            elif len(route_points) <= 60:
-                text = f"WP {index + 1}"
-            else:
-                text = "."
-            self.map_widget.set_marker(point["lat"], point["lng"], text=text)
-
-    def _speed_color(self, speed: Any) -> str:
-        if not isinstance(speed, (int, float)):
-            return "#00d4ff"
-        if speed < 8:
-            return "#2563eb"
-        if speed < 12:
-            return "#16a34a"
-        if speed < 16:
-            return "#f59e0b"
-        return "#dc2626"
+            if len(route_points) >= 2:
+                self._log_speed_profile(route_index, str(route.get("label") or "Route"), route_points)
 
     def _log_speed_profile(self, route_index: int, label: str, route_points: List[Dict[str, Any]]) -> None:
         speeds = [float(point["speed"]) for point in route_points if isinstance(point.get("speed"), (int, float))]
@@ -2332,58 +2189,6 @@ class MapPreviewFrame(ttk.Frame):
             f"Route {route_index} ({label}) speed profile: min {min(speeds):.2f} kn, "
             f"avg {average:.2f} kn, max {max(speeds):.2f} kn, samples {len(speeds)}"
         )
-
-    def _fit_positions(self, positions: List[Tuple[float, float]]) -> None:
-        lats = [lat for lat, _lng in positions]
-        lngs = [lng for _lat, lng in positions]
-        center_lat = (min(lats) + max(lats)) / 2
-        center_lng, west_lng, east_lng, crosses_antimeridian = self._longitude_window(lngs)
-        try:
-            if crosses_antimeridian:
-                self.map_widget.set_position(center_lat, center_lng)
-                self.map_widget.set_zoom(self._zoom_for_span(max(lats) - min(lats), east_lng - west_lng))
-            else:
-                self.map_widget.fit_bounding_box((max(lats), west_lng), (min(lats), east_lng))
-        except Exception:
-            self.map_widget.set_position(center_lat, center_lng)
-            self.map_widget.set_zoom(4 if len(positions) > 1 else 9)
-
-    def _longitude_window(self, lngs: List[float]) -> Tuple[float, float, float, bool]:
-        if len(lngs) == 1:
-            lng = self._normalize_lng(lngs[0])
-            return lng, lng, lng, False
-
-        sorted_lngs = sorted(self._normalize_lng(lng) for lng in lngs)
-        gaps = []
-        for index, lng in enumerate(sorted_lngs):
-            next_lng = sorted_lngs[(index + 1) % len(sorted_lngs)]
-            if index == len(sorted_lngs) - 1:
-                next_lng += 360
-            gaps.append((next_lng - lng, index))
-        largest_gap, largest_gap_index = max(gaps)
-        west_index = (largest_gap_index + 1) % len(sorted_lngs)
-        west = sorted_lngs[west_index]
-        east = sorted_lngs[largest_gap_index]
-        if east < west:
-            east += 360
-        center = self._normalize_lng((west + east) / 2)
-        return center, west, east, west > 180 or east > 180
-
-    def _normalize_lng(self, lng: float) -> float:
-        normalized = ((lng + 180) % 360) - 180
-        return 180 if normalized == -180 and lng > 0 else normalized
-
-    def _zoom_for_span(self, lat_span: float, lng_span: float) -> int:
-        span = max(lat_span, lng_span)
-        if span <= 2:
-            return 6
-        if span <= 8:
-            return 5
-        if span <= 25:
-            return 4
-        if span <= 70:
-            return 3
-        return 2
 
 
 class AbbApiGui(tk.Tk):
