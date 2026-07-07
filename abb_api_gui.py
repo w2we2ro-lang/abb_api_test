@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import os
 import queue
+import tempfile
 import threading
 import time
 import tkinter as tk
+import webbrowser
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -1592,6 +1594,7 @@ class MapPreviewFrame(ttk.Frame):
         ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=3, padx=5, pady=5)
         ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=4, padx=5, pady=5)
         ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=5, padx=5, pady=5)
+        ttk.Button(controls, text="Open 3D Globe", command=self.show_globe_preview).grid(row=0, column=6, padx=5, pady=5)
         ttk.Label(controls, text="Max markers").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.max_markers_var = tk.StringVar(value="1000")
         ttk.Spinbox(controls, textvariable=self.max_markers_var, from_=100, to=20000, increment=100, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -1691,6 +1694,21 @@ class MapPreviewFrame(ttk.Frame):
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("Map Preview Error", str(exc))
+
+    def show_globe_preview(self) -> None:
+        try:
+            data = self.source_data if self.source_data is not None else json.loads(self.source_text.get("1.0", tk.END).strip())
+            data = self._expand_download_urls(data)
+            max_markers = self._get_max_markers()
+            points, lines, routes = self._extract_map_data(data, max_points=max_markers, max_line_points=20000)
+            if not points and not lines and not routes:
+                raise ValueError("No longitude/latitude coordinates were found.")
+            html_path = self._write_globe_html(points, lines, routes)
+            webbrowser.open(html_path.as_uri())
+            self._log(f"3D globe opened: {html_path}")
+        except Exception as exc:
+            self._log(f"ERROR: {exc}")
+            messagebox.showerror("3D Globe Error", str(exc))
 
     def _expand_download_urls(self, data: Any, max_downloads: int = 5) -> Any:
         urls = self._find_download_urls(data)
@@ -1973,6 +1991,222 @@ class MapPreviewFrame(ttk.Frame):
 
         if positions:
             self._fit_positions(positions)
+
+    def _write_globe_html(
+        self,
+        points: List[Dict[str, Any]],
+        lines: List[List[Dict[str, float]]],
+        routes: List[Dict[str, Any]],
+    ) -> Path:
+        payload = {"points": points, "lines": lines, "routes": routes}
+        payload_json = json.dumps(payload)
+        html = self._globe_html_template().replace("__MAP_PAYLOAD__", payload_json)
+        output_path = Path(tempfile.gettempdir()) / "abb_api_3d_globe_preview.html"
+        output_path.write_text(html, encoding="utf-8")
+        return output_path
+
+    def _globe_html_template(self) -> str:
+        return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ABB API 3D Globe Preview</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    .panel {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      width: 280px;
+      background: rgba(18, 24, 38, 0.86);
+      color: #f8fafc;
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      box-shadow: 0 8px 28px rgba(15, 23, 42, 0.35);
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .legend {
+      display: grid;
+      grid-template-columns: 14px 1fr;
+      gap: 5px 7px;
+      margin-top: 8px;
+      align-items: center;
+    }
+    .swatch {
+      width: 14px;
+      height: 5px;
+      border-radius: 999px;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+  <div class="panel">
+    <div class="title">3D Globe Route Preview</div>
+    <div id="summary">Loading route data...</div>
+    <div class="legend">
+      <span class="swatch" style="background:#2563eb"></span><span>&lt; 8 kn</span>
+      <span class="swatch" style="background:#16a34a"></span><span>8 - 12 kn</span>
+      <span class="swatch" style="background:#f59e0b"></span><span>12 - 16 kn</span>
+      <span class="swatch" style="background:#dc2626"></span><span>&gt;= 16 kn</span>
+      <span class="swatch" style="background:#00d4ff"></span><span>no speed value</span>
+    </div>
+  </div>
+  <script>
+    const payload = __MAP_PAYLOAD__;
+    const viewer = new Cesium.Viewer("cesiumContainer", {
+      animation: false,
+      baseLayerPicker: false,
+      fullscreenButton: true,
+      geocoder: false,
+      homeButton: true,
+      infoBox: true,
+      sceneModePicker: true,
+      selectionIndicator: true,
+      timeline: false,
+      navigationHelpButton: true,
+      imageryProvider: new Cesium.UrlTemplateImageryProvider({
+        url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        maximumLevel: 19,
+        credit: "OpenStreetMap"
+      })
+    });
+    viewer.scene.globe.enableLighting = false;
+    viewer.scene.screenSpaceCameraController.enableTilt = true;
+    viewer.scene.screenSpaceCameraController.enableRotate = true;
+
+    const entities = [];
+
+    function toCartesian(point) {
+      return Cesium.Cartesian3.fromDegrees(point.lng, point.lat, point.height || 0);
+    }
+
+    function speedColor(speed) {
+      if (typeof speed !== "number") return "#00d4ff";
+      if (speed < 8) return "#2563eb";
+      if (speed < 12) return "#16a34a";
+      if (speed < 16) return "#f59e0b";
+      return "#dc2626";
+    }
+
+    function addEntity(entity) {
+      const added = viewer.entities.add(entity);
+      entities.push(added);
+      return added;
+    }
+
+    function addMarker(point, label, color, size) {
+      addEntity({
+        name: label || "Point",
+        position: toCartesian(point),
+        point: {
+          pixelSize: size || 8,
+          color: Cesium.Color.fromCssColorString(color || "#60a5fa"),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 1,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
+        },
+        label: {
+          text: label || "",
+          font: "12px Arial",
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 3,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -14),
+          showBackground: false,
+          scale: 0.75
+        }
+      });
+    }
+
+    function addPolyline(points, color, width, name) {
+      if (!points || points.length < 2) return;
+      addEntity({
+        name: name || "Route",
+        polyline: {
+          positions: points.map(toCartesian),
+          width: width || 3,
+          material: Cesium.Color.fromCssColorString(color || "#00d4ff"),
+          arcType: Cesium.ArcType.GEODESIC,
+          clampToGround: false
+        }
+      });
+    }
+
+    payload.points.forEach((point, index) => {
+      addMarker(point, `${index + 1}. ${point.label || "Port"}`, "#38bdf8", 9);
+    });
+
+    payload.lines.forEach((line, index) => {
+      addPolyline(line, "#00d4ff", 3, `Line ${index + 1}`);
+    });
+
+    payload.routes.forEach((route, routeIndex) => {
+      const routePoints = route.points || [];
+      const hasSpeed = routePoints.some(point => typeof point.speed === "number");
+      if (hasSpeed) {
+        for (let index = 0; index < routePoints.length - 1; index += 1) {
+          const start = routePoints[index];
+          const end = routePoints[index + 1];
+          const speed = typeof end.speed === "number" ? end.speed : start.speed;
+          addPolyline([start, end], speedColor(speed), 4, `${route.label || "Route"} segment ${index + 1}`);
+        }
+      } else {
+        addPolyline(routePoints, "#00d4ff", 4, route.label || `Route ${routeIndex + 1}`);
+      }
+
+      const step = Math.max(1, Math.floor(routePoints.length / 250));
+      routePoints.forEach((point, index) => {
+        const endpoint = index === 0 || index === routePoints.length - 1;
+        if (!endpoint && index % step !== 0) return;
+        const label = index === 0 ? `R${routeIndex + 1} START` : index === routePoints.length - 1 ? `R${routeIndex + 1} END` : "";
+        addMarker(point, label, endpoint ? "#f8fafc" : "#94a3b8", endpoint ? 10 : 4);
+      });
+    });
+
+    const speedSamples = payload.routes.flatMap(route => (route.points || []).map(point => point.speed)).filter(speed => typeof speed === "number");
+    const summary = document.getElementById("summary");
+    const pointCount = payload.points.length;
+    const lineCount = payload.lines.length;
+    const routeCount = payload.routes.length;
+    const routeNodeCount = payload.routes.reduce((sum, route) => sum + ((route.points || []).length), 0);
+    if (speedSamples.length) {
+      const min = Math.min(...speedSamples).toFixed(2);
+      const max = Math.max(...speedSamples).toFixed(2);
+      const avg = (speedSamples.reduce((sum, value) => sum + value, 0) / speedSamples.length).toFixed(2);
+      summary.textContent = `Ports ${pointCount}, lines ${lineCount}, routes ${routeCount}, route nodes ${routeNodeCount}, speed min/avg/max ${min}/${avg}/${max} kn`;
+    } else {
+      summary.textContent = `Ports ${pointCount}, lines ${lineCount}, routes ${routeCount}, route nodes ${routeNodeCount}, no speed profile values`;
+    }
+
+    if (entities.length) {
+      viewer.flyTo(entities, { duration: 1.2 });
+    } else {
+      viewer.camera.flyHome(0);
+    }
+  </script>
+</body>
+</html>
+"""
 
     def _render_route_path(self, route_points: List[Dict[str, Any]]) -> None:
         speeds = [point.get("speed") for point in route_points if point.get("speed") is not None]
