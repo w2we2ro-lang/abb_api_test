@@ -300,6 +300,92 @@ RTZ_REQUEST_TYPES = {
     "Optimal Speed Request": "Optimal set speed",
 }
 
+GLOBE_LANDMASSES: List[List[Tuple[float, float]]] = [
+    [
+        (72, -168),
+        (70, -140),
+        (60, -125),
+        (48, -124),
+        (32, -117),
+        (17, -99),
+        (8, -82),
+        (18, -75),
+        (26, -81),
+        (39, -74),
+        (49, -67),
+        (58, -63),
+        (64, -78),
+        (70, -98),
+        (72, -130),
+    ],
+    [
+        (13, -81),
+        (11, -67),
+        (5, -52),
+        (-7, -35),
+        (-23, -41),
+        (-35, -56),
+        (-54, -70),
+        (-44, -75),
+        (-22, -70),
+        (-5, -81),
+    ],
+    [
+        (72, -10),
+        (70, 40),
+        (72, 95),
+        (66, 170),
+        (54, 160),
+        (36, 139),
+        (10, 106),
+        (8, 78),
+        (25, 57),
+        (30, 32),
+        (36, 10),
+        (45, -5),
+        (56, -10),
+        (65, -24),
+    ],
+    [
+        (35, -17),
+        (37, 10),
+        (31, 32),
+        (12, 43),
+        (-5, 40),
+        (-34, 20),
+        (-35, 16),
+        (-22, 12),
+        (-5, 10),
+        (6, -5),
+        (20, -17),
+    ],
+    [
+        (-10, 113),
+        (-12, 142),
+        (-25, 154),
+        (-39, 146),
+        (-34, 115),
+        (-20, 112),
+    ],
+    [
+        (83, -73),
+        (82, -22),
+        (70, -20),
+        (60, -44),
+        (62, -58),
+        (75, -72),
+    ],
+    [
+        (-62, -180),
+        (-66, -120),
+        (-72, -60),
+        (-75, 0),
+        (-72, 60),
+        (-66, 120),
+        (-62, 180),
+    ],
+]
+
 VOYAGE_ENDPOINTS = {
     "Create Route Calculation Schedule": {
         "method": "POST",
@@ -1627,6 +1713,7 @@ class GlobeCanvas(tk.Canvas):
             outline="#38bdf8",
             width=2,
         )
+        self._draw_landmasses()
         self._draw_graticule()
         self._draw_lines()
         self._draw_routes()
@@ -1658,6 +1745,23 @@ class GlobeCanvas(tk.Canvas):
         for lat in range(-60, 61, 30):
             path = [{"lat": lat, "lng": lng} for lng in range(-180, 181, 5)]
             self._draw_geo_path(path, "#334155", 1, samples_per_segment=1)
+
+    def _draw_landmasses(self) -> None:
+        for outline in GLOBE_LANDMASSES:
+            path = [{"lat": lat, "lng": lng} for lat, lng in outline]
+            self._fill_landmass(path)
+            self._draw_geo_path(path, "#14532d", 5, samples_per_segment=4, close_path=True)
+            self._draw_geo_path(path, "#86efac", 1, samples_per_segment=4, close_path=True)
+
+    def _fill_landmass(self, path: List[Dict[str, Any]]) -> None:
+        projected: List[float] = []
+        for point in path:
+            xy = self._project_latlng(float(point["lat"]), float(point["lng"]))
+            if xy is None:
+                return
+            projected.extend(xy)
+        if len(projected) >= 6:
+            self.create_polygon(projected, fill="#123b2f", outline="")
 
     def _draw_lines(self) -> None:
         for line in self.lines:
@@ -1711,7 +1815,9 @@ class GlobeCanvas(tk.Canvas):
         color: str,
         width: int,
         samples_per_segment: Optional[int] = None,
+        close_path: bool = False,
     ) -> None:
+        path = self._prepared_path(path, close_path)
         if len(path) < 2:
             return
         if samples_per_segment is None:
@@ -1730,6 +1836,23 @@ class GlobeCanvas(tk.Canvas):
                 if last_xy is not None:
                     self.create_line(last_xy[0], last_xy[1], xy[0], xy[1], fill=color, width=width, smooth=True)
                 last_xy = xy
+
+    def _prepared_path(self, path: List[Dict[str, Any]], close_path: bool) -> List[Dict[str, Any]]:
+        prepared: List[Dict[str, Any]] = []
+        for point in path:
+            if prepared and self._same_geo_point(prepared[-1], point):
+                continue
+            prepared.append(point)
+        if len(prepared) > 1 and self._same_geo_point(prepared[0], prepared[-1]):
+            prepared = prepared[:-1]
+        if close_path and len(prepared) > 2:
+            prepared = prepared + [prepared[0]]
+        return prepared
+
+    def _same_geo_point(self, first: Dict[str, Any], second: Dict[str, Any]) -> bool:
+        lat_delta = abs(float(first["lat"]) - float(second["lat"]))
+        lng_delta = abs(((float(first["lng"]) - float(second["lng"]) + 180) % 360) - 180)
+        return lat_delta < 1e-7 and lng_delta < 1e-7
 
     def _draw_marker(self, point: Dict[str, Any], color: str, radius: int, label: str = "") -> None:
         xy = self._project_latlng(float(point["lat"]), float(point["lng"]))
@@ -2008,6 +2131,16 @@ class MapPreviewFrame(ttk.Frame):
                 return None
             return {"lat": float(lat), "lng": float(lon)}
 
+        def same_point(first: Dict[str, float], second: Dict[str, float]) -> bool:
+            lat_delta = abs(first["lat"] - second["lat"])
+            lng_delta = abs(((first["lng"] - second["lng"] + 180) % 360) - 180)
+            return lat_delta < 1e-7 and lng_delta < 1e-7
+
+        def open_path(path: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if len(path) > 1 and same_point(path[0], path[-1]):
+                return path[:-1]
+            return path
+
         def feature_point(value: Any) -> Optional[Dict[str, float]]:
             if not isinstance(value, dict):
                 return None
@@ -2064,6 +2197,7 @@ class MapPreviewFrame(ttk.Frame):
 
         def add_line(raw_coords: Any) -> None:
             line = [point for item in raw_coords if (point := coord_pair(item))]
+            line = open_path(line)
             if len(line) < 2:
                 return
             if len(line) > max_line_points:
@@ -2089,6 +2223,7 @@ class MapPreviewFrame(ttk.Frame):
                 point_label = str(props.get("name") or item_name or f"WP {index}")
                 point_speed = extract_speed(item)
                 route_points.append({**point, "label": point_label, "speed": point_speed if point_speed is not None else parent_speed})
+            route_points = open_path(route_points)
             if len(route_points) < 2:
                 return False
             stats["route_nodes_found"] += len(route_points)
