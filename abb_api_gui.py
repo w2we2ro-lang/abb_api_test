@@ -22,6 +22,7 @@ import time
 import tkinter as tk
 import webbrowser
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +34,11 @@ try:
     import tkintermapview
 except ImportError:
     tkintermapview = None
+
+try:
+    import webview
+except ImportError:
+    webview = None
 
 
 def _load_local_defaults() -> Dict[str, str]:
@@ -47,6 +53,55 @@ def _load_local_defaults() -> Dict[str, str]:
 
 
 LOCAL_DEFAULTS = _load_local_defaults()
+
+FIXED_ETA_DURATION_DAYS = 14
+
+
+def _utc_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _realistic_etd_eta(etd_value: Any = None, eta_value: Any = None) -> Tuple[str, str]:
+    now = datetime.now(timezone.utc)
+    minimum_etd = now + timedelta(hours=6)
+    etd = _parse_utc(etd_value)
+    replaced_etd = etd is None or etd < minimum_etd
+    if replaced_etd:
+        etd = now + timedelta(days=1)
+
+    eta = None if replaced_etd else _parse_utc(eta_value)
+    minimum_eta = etd + timedelta(hours=12)
+    maximum_eta = etd + timedelta(days=45)
+    if eta is None or eta < minimum_eta or eta > maximum_eta:
+        eta = etd + timedelta(days=FIXED_ETA_DURATION_DAYS)
+    return _utc_z(etd), _utc_z(eta)
+
+
+def _future_etd(etd_value: Any = None) -> str:
+    now = datetime.now(timezone.utc)
+    etd = _parse_utc(etd_value)
+    if etd is None or etd < now + timedelta(hours=6):
+        etd = now + timedelta(days=1)
+    return _utc_z(etd)
+
+
+def _build_vessel_async_sample(endpoint_name: str) -> Dict[str, Any]:
+    sample = VESSEL_ASYNC_SAMPLES.get(endpoint_name, DEFAULT_SHORTEST_PATH_REQUEST)
+    payload = json.loads(json.dumps(sample))
+    if endpoint_name == "Fixed ETA":
+        payload["etd"], payload["eta"] = _realistic_etd_eta(payload.get("etd"), payload.get("eta"))
+    elif payload.get("etd"):
+        payload["etd"] = _future_etd(payload.get("etd"))
+    return payload
 
 
 TOKEN_URL = os.getenv(
@@ -204,8 +259,6 @@ VESSEL_SAMPLE_CONFIG = {
 }
 
 VESSEL_SAMPLE_RESTRICTIONS = {
-    "northVertex": 80,
-    "southVertex": -80,
     "conditionalAreas": {
         "defaultAreas": ["SpeedLimit", "EmissionControl"],
         "areaOverrides": [{"enabled": True, "areaId": "nogo-4"}],
@@ -727,7 +780,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Load Async Sample", command=self.load_async_sample).pack(side=tk.LEFT, padx=5)
 
     def load_async_sample(self) -> None:
-        sample = VESSEL_ASYNC_SAMPLES.get(self.async_endpoint_var.get(), DEFAULT_SHORTEST_PATH_REQUEST)
+        sample = _build_vessel_async_sample(self.async_endpoint_var.get())
         self.request_text.delete("1.0", tk.END)
         self.request_text.insert("1.0", json.dumps(sample, indent=2))
 
@@ -815,12 +868,12 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         points: List[Dict[str, Any]],
         schedule: Dict[str, Any],
     ) -> Dict[str, Any]:
-        payload = json.loads(json.dumps(VESSEL_ASYNC_SAMPLES[endpoint_name]))
+        payload = _build_vessel_async_sample(endpoint_name)
         payload["id"] = f"rtz-{endpoint_name.lower().replace(' ', '-')}"
         payload["points"] = points
         payload["voyage"] = {"ports": points}
-        if schedule.get("etd"):
-            payload["etd"] = schedule["etd"]
+        if schedule.get("etd") and endpoint_name != "Fixed ETA":
+            payload["etd"] = _future_etd(schedule["etd"])
 
         speeds = schedule.get("speeds") or []
         average_speed = round(sum(speeds) / len(speeds), 2) if speeds else 10
@@ -829,7 +882,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         elif endpoint_name in {"Recommended set speed", "Optimal set speed"}:
             payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
         elif endpoint_name == "Fixed ETA":
-            payload["eta"] = schedule.get("eta") or payload.get("eta")
+            payload["etd"], payload["eta"] = _realistic_etd_eta(schedule.get("etd"), schedule.get("eta"))
             payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
         return payload
 
@@ -1704,11 +1757,26 @@ class MapPreviewFrame(ttk.Frame):
             if not points and not lines and not routes:
                 raise ValueError("No longitude/latitude coordinates were found.")
             html_path = self._write_globe_html(points, lines, routes)
-            webbrowser.open(html_path.as_uri())
-            self._log(f"3D globe opened: {html_path}")
+            self._open_globe_preview(html_path)
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("3D Globe Error", str(exc))
+
+    def _open_globe_preview(self, html_path: Path) -> None:
+        if webview is None:
+            webbrowser.open(html_path.as_uri())
+            self._log(f"3D globe opened in browser fallback: {html_path}")
+            return
+
+        def worker() -> None:
+            try:
+                webview.create_window("ABB 3D Globe Preview", html_path.as_uri(), width=1280, height=820)
+                webview.start()
+            except Exception:
+                webbrowser.open(html_path.as_uri())
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._log(f"3D globe opened in app window: {html_path}")
 
     def _expand_download_urls(self, data: Any, max_downloads: int = 5) -> Any:
         urls = self._find_download_urls(data)
