@@ -1393,6 +1393,8 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
 class MapPreviewFrame(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, padding=10)
+        self.source_data: Optional[Any] = None
+        self._last_extract_stats: Dict[str, int] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -1404,6 +1406,9 @@ class MapPreviewFrame(ttk.Frame):
         ttk.Button(controls, text="Load Active Request", command=self.load_active_request).grid(row=0, column=2, padx=5, pady=5)
         ttk.Button(controls, text="Load Active Response", command=self.load_active_response).grid(row=0, column=3, padx=5, pady=5)
         ttk.Button(controls, text="Show In App", command=self.show_map_preview).grid(row=0, column=4, padx=5, pady=5)
+        ttk.Label(controls, text="Max markers").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.max_markers_var = tk.StringVar(value="1000")
+        ttk.Spinbox(controls, textvariable=self.max_markers_var, from_=100, to=20000, increment=100, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=5)
         controls.columnconfigure(1, weight=1)
 
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -1445,6 +1450,7 @@ class MapPreviewFrame(ttk.Frame):
         ttk.Button(bottom, text="Clear", command=self.clear).pack(side=tk.LEFT)
 
     def clear(self) -> None:
+        self.source_data = None
         self.source_text.delete("1.0", tk.END)
         self.result_text.delete("1.0", tk.END)
 
@@ -1454,6 +1460,7 @@ class MapPreviewFrame(ttk.Frame):
             messagebox.showinfo("Map Preview", "The last active API tab does not have request JSON.")
             return
         raw = frame.request_text.get("1.0", tk.END).strip()
+        self.source_data = None
         self._set_source(raw, "Loaded request JSON from active API tab.")
 
     def load_active_response(self) -> None:
@@ -1461,17 +1468,24 @@ class MapPreviewFrame(ttk.Frame):
         if frame is None or not hasattr(frame, "latest_response_data"):
             messagebox.showinfo("Map Preview", "No parsed JSON response is available from the last active API tab.")
             return
-        raw = json.dumps(frame.latest_response_data, indent=2)
-        self._set_source(raw, "Loaded last JSON response from active API tab.")
+        self.source_data = frame.latest_response_data
+        preview = json.dumps(self.source_data, indent=2)[:50000]
+        if len(preview) == 50000:
+            preview += "\n\n... preview truncated; full response is kept in memory for map rendering ..."
+        self._set_source(preview, "Loaded last JSON response from active API tab.")
 
     def show_map_preview(self) -> None:
         try:
-            data = json.loads(self.source_text.get("1.0", tk.END).strip())
-            points, lines = self._extract_map_data(data)
+            data = self.source_data if self.source_data is not None else json.loads(self.source_text.get("1.0", tk.END).strip())
+            max_markers = self._get_max_markers()
+            points, lines = self._extract_map_data(data, max_points=max_markers)
             if not points and not lines:
                 raise ValueError("No longitude/latitude coordinates were found.")
             self._render_embedded_map(points, lines)
-            self._log(f"Points: {len(points)}")
+            stats = self._last_extract_stats
+            self._log(f"Points rendered: {len(points)} / found: {stats.get('points_found', len(points))}")
+            if stats.get("points_sampled", 0):
+                self._log(f"Large point set sampled to max markers: {max_markers}")
             self._log(f"Lines: {len(lines)}")
         except Exception as exc:
             self._log(f"ERROR: {exc}")
@@ -1491,11 +1505,24 @@ class MapPreviewFrame(ttk.Frame):
         self.result_text.insert(tk.END, f"[{ts}] {message}\n")
         self.result_text.see(tk.END)
 
-    def _extract_map_data(self, data: Any) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, float]]]]:
+    def _get_max_markers(self) -> int:
+        try:
+            value = int(self.max_markers_var.get())
+        except ValueError:
+            value = 1000
+        return max(100, min(value, 20000))
+
+    def _extract_map_data(
+        self,
+        data: Any,
+        max_points: int = 1000,
+        max_line_points: int = 5000,
+    ) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, float]]]]:
         points: List[Dict[str, Any]] = []
         lines: List[List[Dict[str, float]]] = []
         seen_points = set()
         seen_lines = set()
+        stats = {"points_found": 0, "points_sampled": 0, "line_points_trimmed": 0}
 
         def coord_pair(value: Any) -> Optional[Dict[str, float]]:
             if not isinstance(value, list) or len(value) < 2:
@@ -1508,15 +1535,26 @@ class MapPreviewFrame(ttk.Frame):
             return {"lat": float(lat), "lng": float(lon)}
 
         def add_point(point: Dict[str, float], label: str) -> None:
+            stats["points_found"] += 1
             key = (round(point["lat"], 7), round(point["lng"], 7), label)
-            if key not in seen_points:
-                seen_points.add(key)
-                points.append({**point, "label": label})
+            if key in seen_points:
+                return
+            seen_points.add(key)
+            item = {**point, "label": label}
+            if len(points) < max_points:
+                points.append(item)
+            else:
+                stats["points_sampled"] += 1
+                points[(stats["points_found"] - 1) % max_points] = item
 
         def add_line(raw_coords: Any) -> None:
             line = [point for item in raw_coords if (point := coord_pair(item))]
             if len(line) < 2:
                 return
+            if len(line) > max_line_points:
+                step = max(1, len(line) // max_line_points)
+                line = line[::step][:max_line_points]
+                stats["line_points_trimmed"] += 1
             key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in line)
             if key not in seen_lines:
                 seen_lines.add(key)
@@ -1561,6 +1599,7 @@ class MapPreviewFrame(ttk.Frame):
                         visit(item, label)
 
         visit(data)
+        self._last_extract_stats = stats
         return points, lines
 
     def _render_embedded_map(
