@@ -14,10 +14,12 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
 import tkinter as tk
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,27 +33,54 @@ except ImportError:
     tkintermapview = None
 
 
-TOKEN_URL = "https://internal.identity.genix.abilityplatform.abb/public/api/oauth2/token"
+def _load_local_defaults() -> Dict[str, str]:
+    path = Path(__file__).with_name("abb_gui_defaults.json")
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {key: str(value) for key, value in data.items() if value is not None}
 
-VESSEL_REST_BASE_URL = "https://dev.api.voyageoptimization.abb.com/vessel-routing/v2"
-VESSEL_WS_BASE_URL = "wss://dev.api.voyageoptimization.abb.com/vessel-routing/v2"
-VESSEL_DEFAULT_SCOPE = "routing:rest-api:access routing:shortest-path:access"
 
-VOYAGE_API_BASE_URL = "https://dev.api.voyageoptimization.abb.com"
-VOYAGE_DEFAULT_SCOPE = (
-    "voyage:route-calculation-schedule:read "
-    "voyage:route-calculation-schedule:write "
-    "voyage:route-advice:access "
-    "voyage:route-comparison:access"
+LOCAL_DEFAULTS = _load_local_defaults()
+
+
+TOKEN_URL = os.getenv(
+    "ABB_TOKEN_URL",
+    LOCAL_DEFAULTS.get("token_url", "https://identity.genix.abilityplatform.abb/public/api/oauth2/token"),
 )
-PRODUCT_BASE_URL = "https://dev.api.voyageoptimization.abb.com/voyage/products/v1"
-PRODUCT_DEFAULT_SCOPE = "product:report:access"
-NOTIFICATION_REST_BASE_URL = "https://dev.api.voyageoptimization.abb.com"
-NOTIFICATION_WS_URL = "wss://dev.api.voyageoptimization.abb.com/voyage/notification/v1/ws/products"
-NOTIFICATION_DEFAULT_SCOPE = "notification:report:read"
+DEFAULT_CLIENT_ID = os.getenv("ABB_CLIENT_ID", LOCAL_DEFAULTS.get("client_id", ""))
+DEFAULT_CLIENT_SECRET = os.getenv("ABB_CLIENT_SECRET", LOCAL_DEFAULTS.get("client_secret", ""))
+DEFAULT_TOKEN_SCOPE = os.getenv(
+    "ABB_SCOPE",
+    LOCAL_DEFAULTS.get("scope", "https://genb2cep01euwprod.onmicrosoft.com/rs.iam/region"),
+)
+
+VESSEL_REST_BASE_URL = "https://api.voyageoptimization.abb.com/vessel-routing/v2"
+VESSEL_WS_BASE_URL = "wss://api.voyageoptimization.abb.com/vessel-routing/v2"
+VESSEL_DEFAULT_SCOPE = DEFAULT_TOKEN_SCOPE
+
+VOYAGE_API_BASE_URL = "https://api.voyageoptimization.abb.com"
+VOYAGE_DEFAULT_SCOPE = DEFAULT_TOKEN_SCOPE
+PRODUCT_BASE_URL = "https://api.voyageoptimization.abb.com/voyage/products/v1"
+PRODUCT_DEFAULT_SCOPE = DEFAULT_TOKEN_SCOPE
+NOTIFICATION_REST_BASE_URL = "https://api.voyageoptimization.abb.com"
+NOTIFICATION_WS_URL = "wss://api.voyageoptimization.abb.com/voyage/notification/v1/ws/products"
+NOTIFICATION_DEFAULT_SCOPE = DEFAULT_TOKEN_SCOPE
 
 ENVIRONMENT_URLS = {
     "dev": {
+        "token": TOKEN_URL,
+        "vessel_rest": "https://dev.api.voyageoptimization.abb.com/vessel-routing/v2",
+        "vessel_ws": "wss://dev.api.voyageoptimization.abb.com/vessel-routing/v2",
+        "voyage_api": "https://dev.api.voyageoptimization.abb.com",
+        "product_base": "https://dev.api.voyageoptimization.abb.com/voyage/products/v1",
+        "notification_rest": "https://dev.api.voyageoptimization.abb.com",
+        "notification_ws": "wss://dev.api.voyageoptimization.abb.com/voyage/notification/v1/ws/products",
+    },
+    "prod": {
         "token": TOKEN_URL,
         "vessel_rest": VESSEL_REST_BASE_URL,
         "vessel_ws": VESSEL_WS_BASE_URL,
@@ -59,15 +88,6 @@ ENVIRONMENT_URLS = {
         "product_base": PRODUCT_BASE_URL,
         "notification_rest": NOTIFICATION_REST_BASE_URL,
         "notification_ws": NOTIFICATION_WS_URL,
-    },
-    "prod": {
-        "token": TOKEN_URL,
-        "vessel_rest": "https://api.voyageoptimization.abb.com/vessel-routing/v2",
-        "vessel_ws": "wss://api.voyageoptimization.abb.com/vessel-routing/v2",
-        "voyage_api": "https://api.voyageoptimization.abb.com",
-        "product_base": "https://api.voyageoptimization.abb.com/voyage/products/v1",
-        "notification_rest": "https://api.voyageoptimization.abb.com",
-        "notification_ws": "wss://api.voyageoptimization.abb.com/voyage/notification/v1/ws/products",
     },
 }
 
@@ -257,6 +277,14 @@ VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
         "optimizationType": "Time",
         "restrictions": VESSEL_SAMPLE_RESTRICTIONS,
     },
+}
+
+RTZ_REQUEST_TYPES = {
+    "Shortest Path Request": "Shortest path",
+    "Instructed Speed Request": "Instructed set speed",
+    "Recommended Speed Request": "Recommended set speed",
+    "Fixed ETA Request": "Fixed ETA",
+    "Optimal Speed Request": "Optimal set speed",
 }
 
 VOYAGE_ENDPOINTS = {
@@ -588,8 +616,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         auth = ttk.LabelFrame(self, text="Authentication")
         auth.pack(fill=tk.X, pady=(0, 8))
 
-        self.client_id_var = tk.StringVar()
-        self.client_secret_var = tk.StringVar()
+        self.client_id_var = tk.StringVar(value=DEFAULT_CLIENT_ID)
+        self.client_secret_var = tk.StringVar(value=DEFAULT_CLIENT_SECRET)
         self.scope_var = tk.StringVar(value=VESSEL_DEFAULT_SCOPE)
 
         ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -643,6 +671,22 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Entry(async_frame, textvariable=self.ws_client_id_var, width=34).grid(row=1, column=1, sticky="we", padx=5, pady=5)
         async_frame.columnconfigure(1, weight=1)
 
+        rtz_frame = ttk.LabelFrame(left, text="RTZ Converter")
+        rtz_frame.pack(fill=tk.X, pady=(0, 8))
+        self.rtz_path_var = tk.StringVar()
+        self.rtz_request_type_var = tk.StringVar(value="Shortest Path Request")
+        ttk.Entry(rtz_frame, textvariable=self.rtz_path_var).grid(row=0, column=0, sticky="we", padx=5, pady=5)
+        ttk.Button(rtz_frame, text="Browse RTZ", command=self.browse_rtz_file).grid(row=0, column=1, padx=5, pady=5)
+        ttk.Combobox(
+            rtz_frame,
+            textvariable=self.rtz_request_type_var,
+            values=list(RTZ_REQUEST_TYPES.keys()),
+            state="readonly",
+            width=28,
+        ).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Button(rtz_frame, text="Convert RTZ", command=self.convert_rtz_to_request).grid(row=1, column=1, padx=5, pady=5)
+        rtz_frame.columnconfigure(0, weight=1)
+
         req_frame = ttk.LabelFrame(left, text="Route Request JSON")
         req_frame.pack(fill=tk.BOTH, expand=True)
         self.request_text = scrolledtext.ScrolledText(req_frame, height=24, wrap=tk.NONE)
@@ -666,6 +710,93 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         sample = VESSEL_ASYNC_SAMPLES.get(self.async_endpoint_var.get(), DEFAULT_SHORTEST_PATH_REQUEST)
         self.request_text.delete("1.0", tk.END)
         self.request_text.insert("1.0", json.dumps(sample, indent=2))
+
+    def browse_rtz_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select RTZ Route",
+            filetypes=[("RTZ files", "*.rtz"), ("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if path:
+            self.rtz_path_var.set(path)
+
+    def convert_rtz_to_request(self) -> None:
+        try:
+            path = self.rtz_path_var.get().strip()
+            if not path:
+                raise ValueError("Select an RTZ file first.")
+            points, schedule = self._parse_rtz(Path(path))
+            if len(points) < 2:
+                raise ValueError("RTZ route must contain at least two waypoints.")
+            request_type = self.rtz_request_type_var.get()
+            endpoint_name = RTZ_REQUEST_TYPES[request_type]
+            payload = self._build_rtz_request(endpoint_name, points, schedule)
+            self.async_endpoint_var.set(endpoint_name)
+            self.request_text.delete("1.0", tk.END)
+            self.request_text.insert("1.0", json.dumps(payload, indent=2))
+            self.log(f"RTZ converted: {len(points)} waypoints -> {request_type}")
+        except Exception as exc:
+            self.log(f"ERROR: {exc}")
+            messagebox.showerror("RTZ Conversion Error", str(exc))
+
+    def _parse_rtz(self, path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        root = ET.parse(path).getroot()
+        namespace = {"rtz": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
+        waypoint_path = ".//rtz:waypoint" if namespace else ".//waypoint"
+        position_path = "rtz:position" if namespace else "position"
+        schedule_path = ".//rtz:scheduleElement" if namespace else ".//scheduleElement"
+
+        points = []
+        for waypoint in root.findall(waypoint_path, namespace):
+            position = waypoint.find(position_path, namespace)
+            if position is None:
+                continue
+            lat = float(position.attrib["lat"])
+            lon = float(position.attrib["lon"])
+            name = waypoint.attrib.get("name") or f"WP {waypoint.attrib.get('id', len(points))}"
+            geometry_type = (waypoint.find("rtz:leg", namespace) if namespace else waypoint.find("leg"))
+            force_rhumb_line = geometry_type is not None and geometry_type.attrib.get("geometryType") == "Loxodrome"
+            points.append(
+                {
+                    "type": "Feature",
+                    "properties": {"name": name, "forceRhumbLine": force_rhumb_line},
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                }
+            )
+
+        speeds = []
+        etd = None
+        eta = None
+        for item in root.findall(schedule_path, namespace):
+            if item.attrib.get("speed"):
+                speeds.append(float(item.attrib["speed"]))
+            etd = etd or item.attrib.get("etd")
+            eta = item.attrib.get("eta") or eta
+
+        return points, {"speeds": speeds, "etd": etd, "eta": eta}
+
+    def _build_rtz_request(
+        self,
+        endpoint_name: str,
+        points: List[Dict[str, Any]],
+        schedule: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = json.loads(json.dumps(VESSEL_ASYNC_SAMPLES[endpoint_name]))
+        payload["id"] = f"rtz-{endpoint_name.lower().replace(' ', '-')}"
+        payload["points"] = points
+        payload["voyage"] = {"ports": points}
+        if schedule.get("etd"):
+            payload["etd"] = schedule["etd"]
+
+        speeds = schedule.get("speeds") or []
+        average_speed = round(sum(speeds) / len(speeds), 2) if speeds else 10
+        if endpoint_name == "Instructed set speed":
+            payload["speed"] = average_speed
+        elif endpoint_name in {"Recommended set speed", "Optimal set speed"}:
+            payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
+        elif endpoint_name == "Fixed ETA":
+            payload["eta"] = schedule.get("eta") or payload.get("eta")
+            payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
+        return payload
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._require_token()}", "Accept": "application/json"}
@@ -791,8 +922,8 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         auth = ttk.LabelFrame(self, text="Authentication")
         auth.pack(fill=tk.X, pady=(0, 8))
 
-        self.client_id_var = tk.StringVar()
-        self.client_secret_var = tk.StringVar()
+        self.client_id_var = tk.StringVar(value=DEFAULT_CLIENT_ID)
+        self.client_secret_var = tk.StringVar(value=DEFAULT_CLIENT_SECRET)
         self.scope_var = tk.StringVar(value=VOYAGE_DEFAULT_SCOPE)
 
         ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -1003,8 +1134,8 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         auth = ttk.LabelFrame(self, text="Authentication")
         auth.pack(fill=tk.X, pady=(0, 8))
 
-        self.client_id_var = tk.StringVar()
-        self.client_secret_var = tk.StringVar()
+        self.client_id_var = tk.StringVar(value=DEFAULT_CLIENT_ID)
+        self.client_secret_var = tk.StringVar(value=DEFAULT_CLIENT_SECRET)
         self.scope_var = tk.StringVar(value=PRODUCT_DEFAULT_SCOPE)
 
         ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -1240,8 +1371,8 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         auth = ttk.LabelFrame(self, text="Authentication")
         auth.pack(fill=tk.X, pady=(0, 8))
 
-        self.client_id_var = tk.StringVar()
-        self.client_secret_var = tk.StringVar()
+        self.client_id_var = tk.StringVar(value=DEFAULT_CLIENT_ID)
+        self.client_secret_var = tk.StringVar(value=DEFAULT_CLIENT_SECRET)
         self.scope_var = tk.StringVar(value=NOTIFICATION_DEFAULT_SCOPE)
 
         ttk.Label(auth, text="Client ID").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -1459,11 +1590,21 @@ class MapPreviewFrame(ttk.Frame):
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(bottom, text="Clear", command=self.clear).pack(side=tk.LEFT)
+        ttk.Button(bottom, text="Reset Map", command=self.reset_map).pack(side=tk.LEFT, padx=5)
 
     def clear(self) -> None:
         self.source_data = None
         self.source_text.delete("1.0", tk.END)
         self.result_text.delete("1.0", tk.END)
+        self.reset_map()
+
+    def reset_map(self) -> None:
+        if self.map_widget is None:
+            return
+        self.map_widget.delete_all_marker()
+        self.map_widget.delete_all_path()
+        self.map_widget.set_position(29.7262421, -95.2641144)
+        self.map_widget.set_zoom(3)
 
     def load_active_request(self) -> None:
         frame = self._active_api_frame()
@@ -1738,7 +1879,7 @@ class AbbApiGui(tk.Tk):
         toolbar = ttk.Frame(self, padding=(10, 8, 10, 0))
         toolbar.pack(fill=tk.X)
         ttk.Label(toolbar, text="Environment").pack(side=tk.LEFT)
-        self.environment_var = tk.StringVar(value="dev")
+        self.environment_var = tk.StringVar(value="prod")
         env_box = ttk.Combobox(
             toolbar,
             textvariable=self.environment_var,
