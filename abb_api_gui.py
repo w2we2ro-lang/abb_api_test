@@ -745,6 +745,26 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         position_path = "rtz:position" if namespace else "position"
         schedule_path = ".//rtz:scheduleElement" if namespace else ".//scheduleElement"
 
+        schedule_by_waypoint: Dict[str, Dict[str, Any]] = {}
+        speeds = []
+        etd = None
+        eta = None
+        for item in root.findall(schedule_path, namespace):
+            waypoint_id = item.attrib.get("waypointId")
+            waypoint_schedule: Dict[str, Any] = {}
+            if item.attrib.get("speed"):
+                speed = float(item.attrib["speed"])
+                speeds.append(speed)
+                waypoint_schedule["speed"] = speed
+            if item.attrib.get("etd"):
+                waypoint_schedule["etd"] = item.attrib["etd"]
+            if item.attrib.get("eta"):
+                waypoint_schedule["eta"] = item.attrib["eta"]
+            if waypoint_id:
+                schedule_by_waypoint[waypoint_id] = waypoint_schedule
+            etd = etd or item.attrib.get("etd")
+            eta = item.attrib.get("eta") or eta
+
         points = []
         for waypoint in root.findall(waypoint_path, namespace):
             position = waypoint.find(position_path, namespace)
@@ -752,25 +772,20 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 continue
             lat = float(position.attrib["lat"])
             lon = float(position.attrib["lon"])
-            name = waypoint.attrib.get("name") or f"WP {waypoint.attrib.get('id', len(points))}"
+            waypoint_id = waypoint.attrib.get("id")
+            name = waypoint.attrib.get("name") or f"WP {waypoint_id or len(points)}"
             geometry_type = (waypoint.find("rtz:leg", namespace) if namespace else waypoint.find("leg"))
             force_rhumb_line = geometry_type is not None and geometry_type.attrib.get("geometryType") == "Loxodrome"
+            properties = {"name": name, "forceRhumbLine": force_rhumb_line}
+            if waypoint_id in schedule_by_waypoint:
+                properties.update(schedule_by_waypoint[waypoint_id])
             points.append(
                 {
                     "type": "Feature",
-                    "properties": {"name": name, "forceRhumbLine": force_rhumb_line},
+                    "properties": properties,
                     "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 }
             )
-
-        speeds = []
-        etd = None
-        eta = None
-        for item in root.findall(schedule_path, namespace):
-            if item.attrib.get("speed"):
-                speeds.append(float(item.attrib["speed"]))
-            etd = etd or item.attrib.get("etd")
-            eta = item.attrib.get("eta") or eta
 
         return points, {"speeds": speeds, "etd": etd, "eta": eta}
 
@@ -1631,15 +1646,16 @@ class MapPreviewFrame(ttk.Frame):
             data = self.source_data if self.source_data is not None else json.loads(self.source_text.get("1.0", tk.END).strip())
             data = self._expand_download_urls(data)
             max_markers = self._get_max_markers()
-            points, lines = self._extract_map_data(data, max_points=max_markers)
-            if not points and not lines:
+            points, lines, routes = self._extract_map_data(data, max_points=max_markers)
+            if not points and not lines and not routes:
                 raise ValueError("No longitude/latitude coordinates were found.")
-            self._render_embedded_map(points, lines)
+            self._render_embedded_map(points, lines, routes)
             stats = self._last_extract_stats
             self._log(f"Points rendered: {len(points)} / found: {stats.get('points_found', len(points))}")
             if stats.get("points_sampled", 0):
                 self._log(f"Large point set sampled to max markers: {max_markers}")
             self._log(f"Lines: {len(lines)}")
+            self._log(f"Routes: {len(routes)} / route nodes: {stats.get('route_nodes_found', 0)}")
         except Exception as exc:
             self._log(f"ERROR: {exc}")
             messagebox.showerror("Map Preview Error", str(exc))
@@ -1716,12 +1732,14 @@ class MapPreviewFrame(ttk.Frame):
         data: Any,
         max_points: int = 1000,
         max_line_points: int = 5000,
-    ) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, float]]]]:
+    ) -> Tuple[List[Dict[str, Any]], List[List[Dict[str, float]]], List[Dict[str, Any]]]:
         points: List[Dict[str, Any]] = []
         lines: List[List[Dict[str, float]]] = []
+        routes: List[Dict[str, Any]] = []
         seen_points = set()
         seen_lines = set()
-        stats = {"points_found": 0, "points_sampled": 0, "line_points_trimmed": 0}
+        seen_routes = set()
+        stats = {"points_found": 0, "points_sampled": 0, "line_points_trimmed": 0, "route_nodes_found": 0}
 
         def coord_pair(value: Any) -> Optional[Dict[str, float]]:
             if not isinstance(value, list) or len(value) < 2:
@@ -1740,6 +1758,39 @@ class MapPreviewFrame(ttk.Frame):
             if not isinstance(geometry, dict) or geometry.get("type") != "Point":
                 return None
             return coord_pair(geometry.get("coordinates"))
+
+        def numeric_value(value: Any) -> Optional[float]:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    return None
+            return None
+
+        def extract_speed(value: Any) -> Optional[float]:
+            if not isinstance(value, dict):
+                return None
+            for key in ("speed", "speedOverGround", "speedKnots", "sog", "plannedSpeed"):
+                speed = numeric_value(value.get(key))
+                if speed is not None:
+                    return speed
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                speed = extract_speed(properties)
+                if speed is not None:
+                    return speed
+            speed_ranges = value.get("speeds")
+            if isinstance(speed_ranges, list) and speed_ranges:
+                first_range = speed_ranges[0]
+                if isinstance(first_range, dict):
+                    minimum = numeric_value(first_range.get("minimum"))
+                    maximum = numeric_value(first_range.get("maximum"))
+                    if minimum is not None and maximum is not None:
+                        return round((minimum + maximum) / 2, 2)
+                    return minimum if minimum is not None else maximum
+            return None
 
         def add_point(point: Dict[str, float], label: str) -> None:
             stats["points_found"] += 1
@@ -1767,46 +1818,65 @@ class MapPreviewFrame(ttk.Frame):
                 seen_lines.add(key)
                 lines.append(line)
 
-        def add_feature_point_line(features: Any) -> None:
+        def add_feature_point_route(features: Any, parent: Dict[str, Any], label: str) -> bool:
             if not isinstance(features, list):
-                return
-            line = [point for item in features if (point := feature_point(item))]
-            if len(line) < 2:
-                return
-            if len(line) > max_line_points:
-                step = max(1, len(line) // max_line_points)
-                line = line[::step][:max_line_points]
+                return False
+            route_points = []
+            parent_speed = extract_speed(parent)
+            for index, item in enumerate(features, start=1):
+                point = feature_point(item)
+                if not point:
+                    continue
+                props = item.get("properties", {}) if isinstance(item, dict) and isinstance(item.get("properties"), dict) else {}
+                item_name = item.get("name") if isinstance(item, dict) else None
+                point_label = str(props.get("name") or item_name or f"WP {index}")
+                route_points.append({**point, "label": point_label, "speed": extract_speed(item) or parent_speed})
+            if len(route_points) < 2:
+                return False
+            stats["route_nodes_found"] += len(route_points)
+            if len(route_points) > max_line_points:
+                step = max(1, len(route_points) // max_line_points)
+                route_points = route_points[::step][:max_line_points]
                 stats["line_points_trimmed"] += 1
-            key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in line)
-            if key not in seen_lines:
-                seen_lines.add(key)
-                lines.append(line)
+            key = tuple((round(point["lat"], 7), round(point["lng"], 7)) for point in route_points)
+            if key in seen_routes:
+                return True
+            seen_routes.add(key)
+            route_label = str(parent.get("type") or parent.get("id") or parent.get("requestId") or label or "Route")
+            routes.append({"label": route_label, "points": route_points})
+            return True
 
         def visit(obj: Any, label: str = "Point") -> None:
             if isinstance(obj, dict):
                 geom = obj.get("geometry") if isinstance(obj.get("geometry"), dict) else obj
                 geom_type = geom.get("type") if isinstance(geom, dict) else None
                 coords = geom.get("coordinates") if isinstance(geom, dict) else None
+                handled_geometry = False
 
                 # ABB Path/Route responses return route geometry as paths[].points[] or routes[].points[],
-                # where each item is a GeoJSON Point feature. Connect those points into a route line.
+                # where each item is a GeoJSON Point feature. Render them as route nodes instead of port markers.
+                handled_route_points = False
                 if isinstance(obj.get("points"), list):
-                    add_feature_point_line(obj["points"])
+                    handled_route_points = add_feature_point_route(obj["points"], obj, label)
 
                 if geom_type == "Point":
                     point = coord_pair(coords)
                     if point:
                         props = obj.get("properties", {}) if isinstance(obj.get("properties"), dict) else {}
                         add_point(point, str(props.get("name") or label))
+                        handled_geometry = True
                 elif geom_type == "LineString":
                     add_line(coords)
+                    handled_geometry = True
                 elif geom_type in {"MultiLineString", "Polygon"} and isinstance(coords, list):
                     for item in coords:
                         add_line(item)
+                    handled_geometry = True
                 elif geom_type == "MultiPolygon" and isinstance(coords, list):
                     for polygon in coords:
                         for item in polygon:
                             add_line(item)
+                    handled_geometry = True
 
                 if "longitude" in obj and "latitude" in obj:
                     point = coord_pair([obj["longitude"], obj["latitude"]])
@@ -1814,6 +1884,10 @@ class MapPreviewFrame(ttk.Frame):
                         add_point(point, str(obj.get("name") or label))
 
                 for key, value in obj.items():
+                    if handled_route_points and key == "points":
+                        continue
+                    if handled_geometry and key in {"geometry", "coordinates"}:
+                        continue
                     visit(value, str(key))
             elif isinstance(obj, list):
                 if len(obj) > 1 and all(coord_pair(item) for item in obj):
@@ -1827,12 +1901,13 @@ class MapPreviewFrame(ttk.Frame):
 
         visit(data)
         self._last_extract_stats = stats
-        return points, lines
+        return points, lines, routes
 
     def _render_embedded_map(
         self,
         points: List[Dict[str, Any]],
         lines: List[List[Dict[str, float]]],
+        routes: List[Dict[str, Any]],
     ) -> None:
         if self.map_widget is None:
             raise RuntimeError("tkintermapview is not installed. Install requirements_abb_gui.txt and restart the GUI.")
@@ -1853,8 +1928,73 @@ class MapPreviewFrame(ttk.Frame):
                 positions.extend(path)
                 self.map_widget.set_path(path, color="#00d4ff", width=3)
 
+        for route_index, route in enumerate(routes, start=1):
+            route_points = route.get("points", [])
+            if len(route_points) < 2:
+                continue
+            positions.extend((point["lat"], point["lng"]) for point in route_points)
+            self._render_route_path(route_points)
+            self._render_route_nodes(route_index, route_points)
+            self._log_speed_profile(route_index, str(route.get("label") or "Route"), route_points)
+
         if positions:
             self._fit_positions(positions)
+
+    def _render_route_path(self, route_points: List[Dict[str, Any]]) -> None:
+        speeds = [point.get("speed") for point in route_points if point.get("speed") is not None]
+        if not speeds:
+            path = [(point["lat"], point["lng"]) for point in route_points]
+            self.map_widget.set_path(path, color="#00d4ff", width=4)
+            return
+
+        for start, end in zip(route_points, route_points[1:]):
+            speed = end.get("speed") if end.get("speed") is not None else start.get("speed")
+            color = self._speed_color(speed)
+            self.map_widget.set_path(
+                [(start["lat"], start["lng"]), (end["lat"], end["lng"])],
+                color=color,
+                width=4,
+            )
+
+    def _render_route_nodes(self, route_index: int, route_points: List[Dict[str, Any]]) -> None:
+        max_nodes = 200
+        step = max(1, len(route_points) // max_nodes)
+        last_index = len(route_points) - 1
+        for index, point in enumerate(route_points):
+            is_endpoint = index in {0, last_index}
+            if not is_endpoint and index % step != 0:
+                continue
+            if index == 0:
+                text = f"R{route_index} START"
+            elif index == last_index:
+                text = f"R{route_index} END"
+            elif len(route_points) <= 60:
+                text = f"WP {index + 1}"
+            else:
+                text = "."
+            self.map_widget.set_marker(point["lat"], point["lng"], text=text)
+
+    def _speed_color(self, speed: Any) -> str:
+        if not isinstance(speed, (int, float)):
+            return "#00d4ff"
+        if speed < 8:
+            return "#2563eb"
+        if speed < 12:
+            return "#16a34a"
+        if speed < 16:
+            return "#f59e0b"
+        return "#dc2626"
+
+    def _log_speed_profile(self, route_index: int, label: str, route_points: List[Dict[str, Any]]) -> None:
+        speeds = [float(point["speed"]) for point in route_points if isinstance(point.get("speed"), (int, float))]
+        if not speeds:
+            self._log(f"Route {route_index} ({label}) speed profile: no speed values found.")
+            return
+        average = round(sum(speeds) / len(speeds), 2)
+        self._log(
+            f"Route {route_index} ({label}) speed profile: min {min(speeds):.2f} kn, "
+            f"avg {average:.2f} kn, max {max(speeds):.2f} kn, samples {len(speeds)}"
+        )
 
     def _fit_positions(self, positions: List[Tuple[float, float]]) -> None:
         lats = [lat for lat, _lng in positions]
