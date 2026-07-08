@@ -280,6 +280,8 @@ OPTIMAL_BATCH_CONFIG = {
     "minimumHoursBetweenSpeedChanges": 6,
 }
 
+OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 10, "maximum": 25}
+
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
     "Instructed set speed": {
@@ -1092,8 +1094,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         for key in ("etd", "weatherSource"):
             if key in payload:
                 minimal[key] = json.loads(json.dumps(payload[key]))
-        if "speeds" in payload:
-            minimal["speeds"] = self._sanitize_batch_speed_ranges(payload["speeds"])
+        minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
         minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
         minimal["optimizationType"] = "Fuel"
         minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
@@ -1117,23 +1118,6 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     sanitized_props["legBehaviour"] = "ForceSingleRhumbLine"
                 feature["properties"] = sanitized_props
             sanitized.append(feature)
-        return sanitized
-
-    def _sanitize_batch_speed_ranges(self, speeds: Any) -> Any:
-        if not isinstance(speeds, list):
-            return json.loads(json.dumps(speeds))
-        sanitized = []
-        for item in speeds:
-            if not isinstance(item, dict):
-                sanitized.append(item)
-                continue
-            speed_range = {}
-            for key in ("minimum", "maximum"):
-                value = item.get(key)
-                if isinstance(value, (int, float)):
-                    speed_range[key] = round(float(value), 1)
-            if speed_range:
-                sanitized.append(speed_range)
         return sanitized
 
     def _resume_batch_output_if_possible(
