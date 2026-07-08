@@ -1103,15 +1103,19 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if not isinstance(points, list):
             return json.loads(json.dumps(points))
         sanitized = []
-        allowed_property_keys = ("name", "port", "forceRhumbLine")
-        for point in points:
+        allowed_property_keys = ("name", "port")
+        for index, point in enumerate(points):
             feature = json.loads(json.dumps(point))
             if isinstance(feature, dict):
-                for key in ("speed", "rpm", "etd", "eta", "time", "timestamp"):
+                for key in ("speed", "rpm", "etd", "eta", "time", "timestamp", "forceRhumbLine", "legBehaviour"):
                     feature.pop(key, None)
                 props = feature.get("properties")
+                sanitized_props: Dict[str, Any] = {}
                 if isinstance(props, dict):
-                    feature["properties"] = {key: props[key] for key in allowed_property_keys if key in props and props[key] is not None}
+                    sanitized_props = {key: props[key] for key in allowed_property_keys if key in props and props[key] is not None}
+                if index > 0:
+                    sanitized_props["legBehaviour"] = "ForceSingleRhumbLine"
+                feature["properties"] = sanitized_props
             sanitized.append(feature)
         return sanitized
 
