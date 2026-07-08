@@ -54,6 +54,8 @@ LOCAL_DEFAULTS = _load_local_defaults()
 
 FIXED_ETA_DURATION_DAYS = 14
 VESSEL_WS_RESPONSE_TIMEOUT_SECONDS = 300
+OPTIMAL_BATCH_RETRY_ATTEMPTS = 3
+OPTIMAL_BATCH_RETRY_DELAY_SECONDS = 15
 PROFILE_SERIES_COLORS = [
     "#38bdf8",
     "#f59e0b",
@@ -1044,21 +1046,17 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 payload = self._minimal_optimal_batch_payload(payload)
 
                 self._write_batch_json(request_path, payload)
-                self.log(f"[{index}/{len(entries)}] Requesting Optimal set speed from {source_path.name} -> {output_name}")
-                response_data = self._send_ws_request_sync("Optimal set speed", payload)
-                self._write_batch_json(websocket_path, response_data)
-                route_data = self._download_route_response(response_data) or response_data
-                self._write_batch_json(response_path, route_data)
-                self.log(f"Saved JSON: {request_path.name}, {websocket_path.name}, {response_path.name}")
-                route_points = self._extract_route_points_for_rtz(route_data)
-                if len(route_points) < 2:
-                    self.log(f"No route geometry found. Response saved: {response_path}")
-                    continue
-                if rpm_sog_profile:
-                    rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
-                    self.log(f"Applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
-                self._write_rtz(output_path, route_points, route_name=output_path.stem)
-                self.log(f"Saved RTZ: {output_path} ({len(route_points)} waypoints)")
+                self._run_optimal_batch_request_with_retries(
+                    index,
+                    len(entries),
+                    source_path,
+                    output_path,
+                    output_name,
+                    payload,
+                    websocket_path,
+                    response_path,
+                    rpm_sog_profile,
+                )
             self.log("Continuous optimal RTZ batch finished.")
         except Exception as exc:
             self.log(f"ERROR: {exc}")
@@ -1101,6 +1099,72 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def _read_batch_json(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _run_optimal_batch_request_with_retries(
+        self,
+        index: int,
+        total: int,
+        source_path: Path,
+        output_path: Path,
+        output_name: str,
+        payload: Dict[str, Any],
+        websocket_path: Path,
+        response_path: Path,
+        rpm_sog_profile: Optional[Dict[str, Any]],
+    ) -> None:
+        for attempt in range(1, OPTIMAL_BATCH_RETRY_ATTEMPTS + 1):
+            if self.batch_stop_event.is_set():
+                self.log("Continuous optimal RTZ batch stopped.")
+                return
+            try:
+                if self._resume_batch_output_if_possible(output_path, websocket_path, response_path, rpm_sog_profile):
+                    return
+                retry_text = "" if attempt == 1 else f" (retry {attempt}/{OPTIMAL_BATCH_RETRY_ATTEMPTS})"
+                self.log(f"[{index}/{total}] Requesting Optimal set speed from {source_path.name} -> {output_name}{retry_text}")
+                response_data = self._send_ws_request_sync("Optimal set speed", payload)
+                self._write_batch_json(websocket_path, response_data)
+                route_data = self._download_route_response(response_data) or response_data
+                self._write_batch_json(response_path, route_data)
+                self.log(f"Saved JSON: {output_path.with_suffix('.request.json').name}, {websocket_path.name}, {response_path.name}")
+                if self._save_optimal_batch_route(output_path, route_data, rpm_sog_profile):
+                    return
+                return
+            except Exception as exc:
+                if not self._is_connection_reset_10054(exc) or attempt >= OPTIMAL_BATCH_RETRY_ATTEMPTS:
+                    raise
+                self.log(
+                    f"Connection reset 10054 during batch request. "
+                    f"Restarting current item after {OPTIMAL_BATCH_RETRY_DELAY_SECONDS}s "
+                    f"({attempt}/{OPTIMAL_BATCH_RETRY_ATTEMPTS})."
+                )
+                if self.batch_stop_event.wait(OPTIMAL_BATCH_RETRY_DELAY_SECONDS):
+                    self.log("Continuous optimal RTZ batch stopped.")
+                    return
+
+    def _save_optimal_batch_route(
+        self,
+        output_path: Path,
+        route_data: Any,
+        rpm_sog_profile: Optional[Dict[str, Any]],
+    ) -> bool:
+        route_points = self._extract_route_points_for_rtz(route_data)
+        if len(route_points) < 2:
+            self.log(f"No route geometry found. Response saved: {output_path.with_suffix('.response.json')}")
+            return False
+        if rpm_sog_profile:
+            rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
+            self.log(f"Applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
+        self._write_rtz(output_path, route_points, route_name=output_path.stem)
+        self.log(f"Saved RTZ: {output_path} ({len(route_points)} waypoints)")
+        return True
+
+    def _is_connection_reset_10054(self, exc: BaseException) -> bool:
+        if isinstance(exc, ConnectionResetError):
+            return True
+        if getattr(exc, "errno", None) == 10054 or getattr(exc, "winerror", None) == 10054:
+            return True
+        text = str(exc)
+        return "10054" in text or "connection reset" in text.lower()
 
     def _minimal_optimal_batch_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         minimal: Dict[str, Any] = {}
