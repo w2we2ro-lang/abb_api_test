@@ -54,6 +54,16 @@ LOCAL_DEFAULTS = _load_local_defaults()
 
 FIXED_ETA_DURATION_DAYS = 14
 VESSEL_WS_RESPONSE_TIMEOUT_SECONDS = 300
+PROFILE_SERIES_COLORS = [
+    "#38bdf8",
+    "#f59e0b",
+    "#22c55e",
+    "#f472b6",
+    "#a78bfa",
+    "#ef4444",
+    "#14b8a6",
+    "#eab308",
+]
 
 
 def _utc_z(dt: datetime) -> str:
@@ -988,14 +998,19 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
                 output_name = self._batch_output_name(source_path)
                 output_path = output_dir / output_name
+                request_path = output_path.with_suffix(".request.json")
+                websocket_path = output_path.with_suffix(".websocket.json")
+                response_path = output_path.with_suffix(".response.json")
+                self._write_batch_json(request_path, payload)
                 self.log(f"[{index}/{len(entries)}] Requesting Optimal set speed from {source_path.name} -> {output_name}")
                 response_data = self._send_ws_request_sync("Optimal set speed", payload)
+                self._write_batch_json(websocket_path, response_data)
                 route_data = self._download_route_response(response_data) or response_data
+                self._write_batch_json(response_path, route_data)
+                self.log(f"Saved JSON: {request_path.name}, {websocket_path.name}, {response_path.name}")
                 route_points = self._extract_route_points_for_rtz(route_data)
                 if len(route_points) < 2:
-                    raw_path = output_path.with_suffix(".response.json")
-                    raw_path.write_text(json.dumps(route_data, indent=2), encoding="utf-8")
-                    self.log(f"No route geometry found. Response saved: {raw_path}")
+                    self.log(f"No route geometry found. Response saved: {response_path}")
                     continue
                 if rpm_sog_profile:
                     rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
@@ -1038,6 +1053,9 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if metadata.get("imo") and metadata.get("timestamp_label"):
             return f"{metadata['imo']}_SAS_Optimal_{metadata['timestamp_label']}.rtz"
         return f"{source_path.stem}_Optimal.rtz"
+
+    def _write_batch_json(self, path: Path, data: Any) -> None:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def _build_rpm_sog_profile(self, optimal_files: List[Path]) -> Optional[Dict[str, Any]]:
         pairs: List[Tuple[float, float]] = []
@@ -1481,10 +1499,33 @@ class ProfileCanvas(tk.Canvas):
         self.y_label = y_label
         self.color = color
         self.intervals: List[Dict[str, Any]] = []
+        self.series: List[Dict[str, Any]] = []
         self.bind("<Configure>", lambda _event: self.redraw())
 
     def set_intervals(self, intervals: List[Dict[str, Any]]) -> None:
-        self.intervals = intervals
+        self.set_series([{"label": self.title, "color": self.color, "intervals": intervals}] if intervals else [])
+
+    def set_series(self, series: List[Dict[str, Any]]) -> None:
+        normalized = []
+        for index, item in enumerate(series, start=1):
+            intervals = [
+                interval
+                for interval in item.get("intervals", [])
+                if isinstance(interval.get("start"), datetime)
+                and isinstance(interval.get("end"), datetime)
+                and isinstance(interval.get("value"), (int, float))
+            ]
+            if not intervals:
+                continue
+            normalized.append(
+                {
+                    "label": str(item.get("label") or f"Series {index}"),
+                    "color": str(item.get("color") or self.color),
+                    "intervals": sorted(intervals, key=lambda interval: interval["start"]),
+                }
+            )
+        self.series = normalized
+        self.intervals = [interval for item in normalized for interval in item["intervals"]]
         self.redraw()
 
     def redraw(self) -> None:
@@ -1538,19 +1579,41 @@ class ProfileCanvas(tk.Canvas):
             self.create_line(x, top, x, top + plot_h, fill="#1e293b")
             self.create_text(x, top + plot_h + 16, text=tick_time.strftime("%m-%d %H:%M"), fill="#cbd5e1", font=("Segoe UI", 8))
 
-        previous_x = None
-        previous_y = None
-        for item in self.intervals:
-            x1 = x_pos(item["start"])
-            x2 = x_pos(item["end"])
-            y = y_pos(float(item["value"]))
-            if previous_x is not None and previous_y is not None:
-                self.create_line(x1, previous_y, x1, y, fill=self.color, width=2)
-            self.create_line(x1, y, x2, y, fill=self.color, width=2)
-            previous_x = x2
-            previous_y = y
+        for item in self.series:
+            previous_x = None
+            previous_y = None
+            color = item["color"]
+            for interval in item["intervals"]:
+                x1 = x_pos(interval["start"])
+                x2 = x_pos(interval["end"])
+                y = y_pos(float(interval["value"]))
+                if previous_x is not None and previous_y is not None:
+                    self.create_line(x1, previous_y, x1, y, fill=color, width=2)
+                self.create_line(x1, y, x2, y, fill=color, width=2)
+                previous_x = x2
+                previous_y = y
 
         self.create_text(16, top + plot_h / 2, text=self.y_label, fill="#cbd5e1", font=("Segoe UI", 8), angle=90)
+        self._draw_legend(width)
+
+    def _draw_legend(self, width: int) -> None:
+        if not self.series:
+            return
+        max_items = 6
+        y = 16
+        x = width - 16
+        for item in self.series[:max_items]:
+            label = self._short_label(item["label"])
+            text_id = self.create_text(x, y, anchor="ne", text=label, fill="#cbd5e1", font=("Segoe UI", 8))
+            bbox = self.bbox(text_id)
+            line_x = (bbox[0] - 22) if bbox else (x - 96)
+            self.create_line(line_x, y, line_x + 14, y, fill=item["color"], width=3)
+            y += 15
+        if len(self.series) > max_items:
+            self.create_text(x, y, anchor="ne", text=f"+{len(self.series) - max_items} more", fill="#94a3b8", font=("Segoe UI", 8))
+
+    def _short_label(self, label: str) -> str:
+        return label if len(label) <= 30 else f"{label[:27]}..."
 
 
 class OptimalProfileFrame(ttk.Frame, LogMixin):
@@ -1558,22 +1621,29 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         super().__init__(master, padding=10)
         self.speed_intervals: List[Dict[str, Any]] = []
         self.rpm_intervals: List[Dict[str, Any]] = []
+        self.profile_series: List[Dict[str, Any]] = []
         self._init_log_queue()
         self._build_ui()
         self.after(100, self._flush_log_queue)
 
     def _build_ui(self) -> None:
-        controls = ttk.LabelFrame(self, text="Optimal RTZ Folder")
+        controls = ttk.LabelFrame(self, text="Optimal RTZ Folders")
         controls.pack(fill=tk.X, pady=(0, 8))
         self.profile_folder_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
         self.profile_limit_var = tk.StringVar(value="0")
-        ttk.Label(controls, text="Folder").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(controls, textvariable=self.profile_folder_var).grid(row=0, column=1, sticky="we", padx=5, pady=5)
-        ttk.Button(controls, text="Browse", command=self.browse_profile_folder).grid(row=0, column=2, padx=5, pady=5)
-        ttk.Label(controls, text="Max files (0 = all)").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        ttk.Spinbox(controls, textvariable=self.profile_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=1, column=1, sticky="w", padx=5, pady=5)
-        ttk.Button(controls, text="Generate Profiles", command=self.generate_profiles).grid(row=1, column=1, sticky="e", padx=5, pady=5)
-        ttk.Button(controls, text="Save CSV", command=self.save_profiles_csv).grid(row=1, column=2, padx=5, pady=5)
+        ttk.Label(controls, text="Folders").grid(row=0, column=0, sticky="nw", padx=5, pady=5)
+        self.profile_folder_list = tk.Listbox(controls, height=4, exportselection=False)
+        self.profile_folder_list.grid(row=0, column=1, rowspan=3, sticky="we", padx=5, pady=5)
+        self.profile_folder_list.insert(tk.END, str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
+        folder_buttons = ttk.Frame(controls)
+        folder_buttons.grid(row=0, column=2, rowspan=3, sticky="n", padx=5, pady=5)
+        ttk.Button(folder_buttons, text="Add Folder", command=self.browse_profile_folder).pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(folder_buttons, text="Remove", command=self.remove_profile_folder).pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(folder_buttons, text="Clear", command=self.clear_profile_folders).pack(fill=tk.X)
+        ttk.Label(controls, text="Max files (0 = all)").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        ttk.Spinbox(controls, textvariable=self.profile_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        ttk.Button(controls, text="Generate Profiles", command=self.generate_profiles).grid(row=3, column=1, sticky="e", padx=5, pady=5)
+        ttk.Button(controls, text="Save CSV", command=self.save_profiles_csv).grid(row=3, column=2, padx=5, pady=5)
         controls.columnconfigure(1, weight=1)
 
         charts = ttk.PanedWindow(self, orient=tk.VERTICAL)
@@ -1595,70 +1665,152 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
     def browse_profile_folder(self) -> None:
         path = filedialog.askdirectory(title="Select optimal RTZ folder", initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT))
         if path:
-            self.profile_folder_var.set(path)
+            self._add_profile_folder(path)
+
+    def remove_profile_folder(self) -> None:
+        for index in reversed(self.profile_folder_list.curselection()):
+            self.profile_folder_list.delete(index)
+
+    def clear_profile_folders(self) -> None:
+        self.profile_folder_list.delete(0, tk.END)
+
+    def _add_profile_folder(self, path: str) -> None:
+        value = str(Path(path))
+        existing = set(self.profile_folder_list.get(0, tk.END))
+        if value not in existing:
+            self.profile_folder_list.insert(tk.END, value)
+
+    def _profile_folders(self) -> List[Path]:
+        values = [str(value).strip() for value in self.profile_folder_list.get(0, tk.END) if str(value).strip()]
+        if not values and self.profile_folder_var.get().strip():
+            values = [self.profile_folder_var.get().strip()]
+        folders = []
+        seen = set()
+        for value in values:
+            folder = Path(value)
+            key = str(folder).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            folders.append(folder)
+        return folders
 
     def generate_profiles(self) -> None:
         threading.Thread(target=self._generate_profiles_worker, daemon=True).start()
 
     def _generate_profiles_worker(self) -> None:
         try:
-            folder = Path(self.profile_folder_var.get().strip())
-            if not folder.exists():
-                raise ValueError(f"Folder not found: {folder}")
-            files = self._optimal_rtz_files(folder)
+            folders = self._profile_folders()
+            if not folders:
+                raise ValueError("Add at least one optimal RTZ folder.")
             limit = self._profile_limit()
-            if limit:
-                files = files[:limit]
-            if len(files) < 2:
-                raise ValueError("At least two optimal RTZ files are required to build time profiles.")
-
-            records = []
-            for path in files:
-                metadata = self._rtz_file_metadata(path)
-                timestamp = metadata.get("timestamp_dt")
-                if timestamp is None:
-                    self.log(f"Skipping file without timestamp pattern: {path.name}")
+            used_labels: set = set()
+            profile_series: List[Dict[str, Any]] = []
+            for folder_index, folder in enumerate(folders):
+                if not folder.exists():
+                    raise ValueError(f"Folder not found: {folder}")
+                files = self._optimal_rtz_files(folder)
+                if limit:
+                    files = files[:limit]
+                if len(files) < 2:
+                    self.log(f"Skipping folder with fewer than two RTZ files: {folder}")
                     continue
-                points = self._parse_profile_rtz(path)
-                if not points:
-                    self.log(f"Skipping RTZ without waypoints: {path.name}")
+
+                records = []
+                for path in files:
+                    metadata = self._rtz_file_metadata(path)
+                    timestamp = metadata.get("timestamp_dt")
+                    if timestamp is None:
+                        self.log(f"Skipping file without timestamp pattern: {path.name}")
+                        continue
+                    points = self._parse_profile_rtz(path)
+                    if not points:
+                        self.log(f"Skipping RTZ without waypoints: {path.name}")
+                        continue
+                    records.append({"path": path, "time": timestamp, "points": points})
+                records.sort(key=lambda item: item["time"])
+                if len(records) < 2:
+                    self.log(f"Skipping folder without usable timestamped RTZ pairs: {folder}")
                     continue
-                records.append({"path": path, "time": timestamp, "points": points})
-            records.sort(key=lambda item: item["time"])
-            if len(records) < 2:
-                raise ValueError("No usable timestamped optimal RTZ pairs found.")
 
-            speed_intervals: List[Dict[str, Any]] = []
-            rpm_intervals: List[Dict[str, Any]] = []
-            for index in range(len(records) - 1):
-                speed_items, rpm_items = self._profile_pair_intervals(records[index], records[index + 1])
-                speed_intervals.extend(speed_items)
-                rpm_intervals.extend(rpm_items)
+                label = self._profile_series_label(folder, used_labels)
+                color = PROFILE_SERIES_COLORS[folder_index % len(PROFILE_SERIES_COLORS)]
+                speed_intervals: List[Dict[str, Any]] = []
+                rpm_intervals: List[Dict[str, Any]] = []
+                for index in range(len(records) - 1):
+                    speed_items, rpm_items = self._profile_pair_intervals(records[index], records[index + 1])
+                    for item in speed_items:
+                        item["series"] = label
+                        item["folder"] = str(folder)
+                    for item in rpm_items:
+                        item["series"] = label
+                        item["folder"] = str(folder)
+                    speed_intervals.extend(speed_items)
+                    rpm_intervals.extend(rpm_items)
 
-            self.after(0, lambda: self._apply_profiles(speed_intervals, rpm_intervals, records))
+                profile_series.append(
+                    {
+                        "label": label,
+                        "folder": str(folder),
+                        "color": color,
+                        "records": records,
+                        "speed_intervals": speed_intervals,
+                        "rpm_intervals": rpm_intervals,
+                    }
+                )
+
+            if not profile_series:
+                raise ValueError("No usable optimal RTZ folders found.")
+
+            self.after(0, lambda: self._apply_profiles(profile_series))
         except Exception as exc:
             self.log(f"ERROR: {exc}")
             self.after(0, lambda: messagebox.showerror("Optimal Profile Error", str(exc)))
 
-    def _apply_profiles(
-        self,
-        speed_intervals: List[Dict[str, Any]],
-        rpm_intervals: List[Dict[str, Any]],
-        records: List[Dict[str, Any]],
-    ) -> None:
-        self.speed_intervals = speed_intervals
-        self.rpm_intervals = rpm_intervals
-        self.speed_canvas.set_intervals(speed_intervals)
-        self.rpm_canvas.set_intervals(rpm_intervals)
-        self.log(
-            f"Generated profiles from {len(records)} RTZ files: "
-            f"{len(speed_intervals)} speed intervals, {len(rpm_intervals)} rpm intervals."
+    def _profile_series_label(self, folder: Path, used_labels: set) -> str:
+        base = folder.name or str(folder)
+        label = base
+        if label in used_labels:
+            parent_label = f"{folder.parent.name}\\{base}" if folder.parent.name else base
+            label = parent_label
+        suffix = 2
+        while label in used_labels:
+            label = f"{base} {suffix}"
+            suffix += 1
+        used_labels.add(label)
+        return label
+
+    def _apply_profiles(self, profile_series: List[Dict[str, Any]]) -> None:
+        self.profile_series = profile_series
+        self.speed_intervals = [item for series in profile_series for item in series["speed_intervals"]]
+        self.rpm_intervals = [item for series in profile_series for item in series["rpm_intervals"]]
+        self.speed_canvas.set_series(
+            [
+                {"label": series["label"], "color": series["color"], "intervals": series["speed_intervals"]}
+                for series in profile_series
+            ]
         )
-        if speed_intervals:
-            speeds = [float(item["value"]) for item in speed_intervals]
+        self.rpm_canvas.set_series(
+            [
+                {"label": series["label"], "color": series["color"], "intervals": series["rpm_intervals"]}
+                for series in profile_series
+            ]
+        )
+        total_records = sum(len(series["records"]) for series in profile_series)
+        self.log(
+            f"Generated profiles from {len(profile_series)} folders and {total_records} RTZ files: "
+            f"{len(self.speed_intervals)} speed intervals, {len(self.rpm_intervals)} rpm intervals."
+        )
+        for series in profile_series:
+            self.log(
+                f"{series['label']}: {len(series['records'])} files, "
+                f"{len(series['speed_intervals'])} speed intervals, {len(series['rpm_intervals'])} rpm intervals."
+            )
+        if self.speed_intervals:
+            speeds = [float(item["value"]) for item in self.speed_intervals]
             self.log(f"Speed min/avg/max: {min(speeds):.2f}/{sum(speeds) / len(speeds):.2f}/{max(speeds):.2f} kn")
-        if rpm_intervals:
-            rpms = [float(item["value"]) for item in rpm_intervals]
+        if self.rpm_intervals:
+            rpms = [float(item["value"]) for item in self.rpm_intervals]
             self.log(f"RPM min/avg/max: {min(rpms):.2f}/{sum(rpms) / len(rpms):.2f}/{max(rpms):.2f}")
 
     def save_profiles_csv(self) -> None:
@@ -1674,20 +1826,23 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
             return
         with open(path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["profile", "start_utc", "end_utc", "value", "source_file", "leg_index", "distance_nm"])
-            for profile_name, intervals in (("speed", self.speed_intervals), ("rpm", self.rpm_intervals)):
-                for item in intervals:
-                    writer.writerow(
-                        [
-                            profile_name,
-                            _utc_z(item["start"]),
-                            _utc_z(item["end"]),
-                            self._fmt_float(float(item["value"])),
-                            item.get("source", ""),
-                            item.get("leg_index", ""),
-                            self._fmt_float(float(item.get("distance_nm", 0))),
-                        ]
-                    )
+            writer.writerow(["profile", "series", "folder", "start_utc", "end_utc", "value", "source_file", "leg_index", "distance_nm"])
+            for series in self.profile_series:
+                for profile_name, intervals in (("speed", series["speed_intervals"]), ("rpm", series["rpm_intervals"])):
+                    for item in intervals:
+                        writer.writerow(
+                            [
+                                profile_name,
+                                item.get("series", series.get("label", "")),
+                                item.get("folder", series.get("folder", "")),
+                                _utc_z(item["start"]),
+                                _utc_z(item["end"]),
+                                self._fmt_float(float(item["value"])),
+                                item.get("source", ""),
+                                item.get("leg_index", ""),
+                                self._fmt_float(float(item.get("distance_nm", 0))),
+                            ]
+                        )
         self.log(f"Profile CSV saved: {path}")
 
     def _profile_limit(self) -> int:
