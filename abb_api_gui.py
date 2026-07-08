@@ -939,9 +939,22 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 raise ValueError("Planned RTZ must contain at least two waypoints.")
 
             optimal_files = self._optimal_rtz_files(optimal_dir)
+            rpm_sog_files = list(optimal_files)
             limit = self._batch_limit()
             if limit:
                 optimal_files = optimal_files[:limit]
+
+            rpm_sog_profile = self._build_rpm_sog_profile(rpm_sog_files)
+            if rpm_sog_profile:
+                self.log(
+                    "RPM-SOG profile confirmed: "
+                    f"{rpm_sog_profile['pairs']} samples, "
+                    f"{len(rpm_sog_profile['curve'])} speed bins, "
+                    f"SOG {rpm_sog_profile['speed_min']:.2f}-{rpm_sog_profile['speed_max']:.2f} kn, "
+                    f"RPM {rpm_sog_profile['rpm_min']:.2f}-{rpm_sog_profile['rpm_max']:.2f}."
+                )
+            else:
+                self.log("RPM-SOG profile not available. Output RTZ files will keep ABB speed values only.")
 
             entries = []
             for sequence, optimal_path in enumerate(optimal_files, start=1):
@@ -984,6 +997,9 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     raw_path.write_text(json.dumps(route_data, indent=2), encoding="utf-8")
                     self.log(f"No route geometry found. Response saved: {raw_path}")
                     continue
+                if rpm_sog_profile:
+                    rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
+                    self.log(f"Applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
                 self._write_rtz(output_path, route_points, route_name=output_path.stem)
                 self.log(f"Saved RTZ: {output_path} ({len(route_points)} waypoints)")
             self.log("Continuous optimal RTZ batch finished.")
@@ -1022,6 +1038,83 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if metadata.get("imo") and metadata.get("timestamp_label"):
             return f"{metadata['imo']}_SAS_Optimal_{metadata['timestamp_label']}.rtz"
         return f"{source_path.stem}_Optimal.rtz"
+
+    def _build_rpm_sog_profile(self, optimal_files: List[Path]) -> Optional[Dict[str, Any]]:
+        pairs: List[Tuple[float, float]] = []
+        for optimal_path in optimal_files:
+            try:
+                points, _schedule = self._parse_rtz(optimal_path)
+            except Exception as exc:
+                self.log(f"RPM-SOG profile skipped unreadable RTZ: {optimal_path.name} ({exc})")
+                continue
+            for point in points:
+                props = point.get("properties") if isinstance(point.get("properties"), dict) else {}
+                speed = props.get("speed")
+                rpm = props.get("rpm")
+                if isinstance(speed, (int, float)) and isinstance(rpm, (int, float)) and speed > 0 and rpm > 0:
+                    pairs.append((float(speed), float(rpm)))
+
+        if len(pairs) < 2:
+            return None
+
+        rpm_by_speed: Dict[float, List[float]] = {}
+        for speed, rpm in pairs:
+            rpm_by_speed.setdefault(round(speed, 2), []).append(rpm)
+
+        curve = sorted((speed, sum(values) / len(values)) for speed, values in rpm_by_speed.items())
+        if not curve:
+            return None
+
+        speeds = [speed for speed, _rpm in pairs]
+        rpms = [rpm for _speed, rpm in pairs]
+        return {
+            "pairs": len(pairs),
+            "curve": curve,
+            "speed_min": min(speeds),
+            "speed_max": max(speeds),
+            "rpm_min": min(rpms),
+            "rpm_max": max(rpms),
+        }
+
+    def _apply_rpm_sog_profile(self, route_points: List[Dict[str, Any]], profile: Dict[str, Any]) -> int:
+        applied = 0
+        for point in route_points:
+            props = point.setdefault("properties", {})
+            if not isinstance(props, dict):
+                continue
+            if isinstance(props.get("rpm"), (int, float)):
+                applied += 1
+                continue
+            speed = props.get("speed")
+            if not isinstance(speed, (int, float)):
+                continue
+            rpm = self._rpm_from_sog(float(speed), profile)
+            if rpm is None:
+                continue
+            props["rpm"] = round(rpm, 2)
+            applied += 1
+        return applied
+
+    def _rpm_from_sog(self, speed: float, profile: Dict[str, Any]) -> Optional[float]:
+        curve = profile.get("curve")
+        if not isinstance(curve, list) or not curve:
+            return None
+        if len(curve) == 1:
+            return float(curve[0][1])
+        if speed <= curve[0][0]:
+            return float(curve[0][1])
+        if speed >= curve[-1][0]:
+            return float(curve[-1][1])
+
+        for index in range(1, len(curve)):
+            lower_speed, lower_rpm = curve[index - 1]
+            upper_speed, upper_rpm = curve[index]
+            if speed <= upper_speed:
+                if upper_speed == lower_speed:
+                    return float(upper_rpm)
+                ratio = (speed - lower_speed) / (upper_speed - lower_speed)
+                return float(lower_rpm + (upper_rpm - lower_rpm) * ratio)
+        return float(curve[-1][1])
 
     def _remaining_planned_points(self, planned_points: List[Dict[str, Any]], current_point: Dict[str, Any]) -> List[Dict[str, Any]]:
         if len(planned_points) < 2:
@@ -1147,15 +1240,15 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     return lat, lon
             return None
 
-        def speed_value(obj: Any) -> Optional[float]:
+        def numeric_value(obj: Any, keys: Tuple[str, ...]) -> Optional[float]:
             if not isinstance(obj, dict):
                 return None
-            for key in ("speed", "speedOverGround", "speedKnots", "sog", "plannedSpeed"):
+            for key in keys:
                 value = obj.get(key)
                 if isinstance(value, (int, float)):
                     return float(value)
             props = obj.get("properties")
-            return speed_value(props) if isinstance(props, dict) else None
+            return numeric_value(props, keys) if isinstance(props, dict) else None
 
         def feature_from_point(obj: Any, index: int) -> Optional[Dict[str, Any]]:
             if not isinstance(obj, dict):
@@ -1167,9 +1260,12 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             lat, lon = pair
             props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
             properties = {"name": str(props.get("name") or obj.get("name") or f"WP {index}")}
-            speed = speed_value(obj)
+            speed = numeric_value(obj, ("speed", "speedOverGround", "speedKnots", "sog", "plannedSpeed"))
             if speed is not None:
                 properties["speed"] = speed
+            rpm = numeric_value(obj, ("rpm", "engineRpm", "shaftRpm"))
+            if rpm is not None:
+                properties["rpm"] = rpm
             for key in ("eta", "etd", "time", "timestamp"):
                 if props.get(key):
                     properties[key] = props[key]
@@ -1210,6 +1306,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         waypoints = ET.SubElement(route, f"{{{namespace}}}waypoints")
         has_schedule = False
         speeds_by_index: Dict[int, float] = {}
+        rpms_by_index: Dict[int, float] = {}
         times_by_index: Dict[int, Dict[str, str]] = {}
 
         for index, point in enumerate(route_points):
@@ -1222,6 +1319,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             if isinstance(props.get("speed"), (int, float)):
                 speeds_by_index[index] = float(props["speed"])
                 has_schedule = True
+            if isinstance(props.get("rpm"), (int, float)):
+                rpms_by_index[index] = float(props["rpm"])
             time_attrs = {key: str(props[key]) for key in ("etd", "eta") if props.get(key)}
             if time_attrs:
                 times_by_index[index] = time_attrs
@@ -1238,12 +1337,17 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 attrs.update(times_by_index.get(index, {}))
                 ET.SubElement(calculated, f"{{{namespace}}}scheduleElement", attrs)
 
-        if speeds_by_index:
+        if speeds_by_index or rpms_by_index:
             extensions = ET.SubElement(route, f"{{{namespace}}}extensions")
             extension = ET.SubElement(extensions, f"{{{namespace}}}extension")
             vo = ET.SubElement(extension, f"{{{namespace}}}VoyageOptimization")
-            for index, speed in speeds_by_index.items():
-                ET.SubElement(vo, f"{{{namespace}}}VOElement", {"waypointId": str(index), "usingspeed": "0", "speed": self._fmt_float(speed)})
+            for index in sorted(set(speeds_by_index) | set(rpms_by_index)):
+                attrs = {"waypointId": str(index), "usingspeed": "0"}
+                if index in speeds_by_index:
+                    attrs["speed"] = self._fmt_float(speeds_by_index[index])
+                if index in rpms_by_index:
+                    attrs["rpm"] = self._fmt_float(rpms_by_index[index])
+                ET.SubElement(vo, f"{{{namespace}}}VOElement", attrs)
 
         ET.indent(route, space="    ")
         ET.ElementTree(route).write(output_path, encoding="UTF-8", xml_declaration=True)
