@@ -95,6 +95,27 @@ def _realistic_etd_eta(etd_value: Any = None, eta_value: Any = None) -> Tuple[st
     return _utc_z(etd), _utc_z(eta)
 
 
+def _use_next_waypoint_speed_rpm(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    original_values: List[Dict[str, float]] = []
+    for point in points:
+        props = point.get("properties") if isinstance(point.get("properties"), dict) else {}
+        values = {}
+        for key in ("speed", "rpm"):
+            if isinstance(props.get(key), (int, float)):
+                values[key] = float(props[key])
+        original_values.append(values)
+
+    for index, point in enumerate(points):
+        props = point.setdefault("properties", {})
+        if not isinstance(props, dict):
+            continue
+        props.pop("speed", None)
+        props.pop("rpm", None)
+        if index + 1 < len(original_values):
+            props.update(original_values[index + 1])
+    return points
+
+
 def _future_etd(etd_value: Any = None) -> str:
     now = datetime.now(timezone.utc)
     etd = _parse_utc(etd_value)
@@ -911,6 +932,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 }
             )
 
+        _use_next_waypoint_speed_rpm(points)
         return points, {"speeds": speeds, "etd": etd, "eta": eta}
 
     def _build_rtz_request(
@@ -2022,6 +2044,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
                     "geometry": {"type": "Point", "coordinates": [float(position.attrib["lon"]), float(position.attrib["lat"])]},
                 }
             )
+        _use_next_waypoint_speed_rpm(points)
         return points
 
     def _profile_pair_intervals(
