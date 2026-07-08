@@ -17,6 +17,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -306,6 +307,15 @@ RTZ_REQUEST_TYPES = {
     "Fixed ETA Request": "Fixed ETA",
     "Optimal Speed Request": "Optimal set speed",
 }
+
+DEFAULT_CONTINUOUS_BATCH_ROOT = Path(r"C:\Users\Device_SHI\Downloads\EVERMAX_Yantian2Panama\EVERMAX_Yantian2Panama")
+DEFAULT_CONTINUOUS_PLANNED_RTZ = DEFAULT_CONTINUOUS_BATCH_ROOT / "9935208_SAS_Planned_20260606_092117.rtz"
+DEFAULT_CONTINUOUS_OPTIMAL_DIR = DEFAULT_CONTINUOUS_BATCH_ROOT / "optimal"
+DEFAULT_CONTINUOUS_OUTPUT_DIR = DEFAULT_CONTINUOUS_BATCH_ROOT / "abb_optimal"
+RTZ_FILE_NAME_RE = re.compile(
+    r"^(?P<imo>\d+)_SAS_(?P<kind>Planned|Optimal)_(?P<date>\d{8})_(?P<time>\d{6})\.rtz$",
+    re.IGNORECASE,
+)
 
 EARTH_TEXTURE_URL = (
     "https://assets.science.nasa.gov/content/dam/science/esd/eo/images/bmng/"
@@ -636,6 +646,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master, padding=10)
         self.access_token: Optional[str] = None
+        self.batch_stop_event = threading.Event()
+        self.batch_running = False
         self._init_log_queue()
         self._build_ui()
         self.after(100, self._flush_log_queue)
@@ -715,6 +727,27 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(rtz_frame, text="Convert RTZ", command=self.convert_rtz_to_request).grid(row=1, column=1, padx=5, pady=5)
         rtz_frame.columnconfigure(0, weight=1)
 
+        batch_frame = ttk.LabelFrame(left, text="Continuous Optimal RTZ Batch")
+        batch_frame.pack(fill=tk.X, pady=(0, 8))
+        self.batch_planned_path_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_PLANNED_RTZ))
+        self.batch_optimal_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
+        self.batch_output_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
+        self.batch_limit_var = tk.StringVar(value="0")
+        ttk.Label(batch_frame, text="Planned RTZ").grid(row=0, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(batch_frame, textvariable=self.batch_planned_path_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Browse", command=self.browse_batch_planned_file).grid(row=0, column=2, padx=5, pady=3)
+        ttk.Label(batch_frame, text="Optimal folder").grid(row=1, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(batch_frame, textvariable=self.batch_optimal_dir_var).grid(row=1, column=1, sticky="we", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Browse", command=self.browse_batch_optimal_dir).grid(row=1, column=2, padx=5, pady=3)
+        ttk.Label(batch_frame, text="Output folder").grid(row=2, column=0, sticky="w", padx=5, pady=3)
+        ttk.Entry(batch_frame, textvariable=self.batch_output_dir_var).grid(row=2, column=1, sticky="we", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Browse", command=self.browse_batch_output_dir).grid(row=2, column=2, padx=5, pady=3)
+        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=3, column=0, sticky="w", padx=5, pady=3)
+        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=3, column=1, sticky="w", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Start Optimal Batch", command=self.start_continuous_optimal_batch).grid(row=3, column=1, sticky="e", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=3, column=2, padx=5, pady=3)
+        batch_frame.columnconfigure(1, weight=1)
+
         req_frame = ttk.LabelFrame(left, text="Route Request JSON")
         req_frame.pack(fill=tk.BOTH, expand=True)
         self.request_text = scrolledtext.ScrolledText(req_frame, height=24, wrap=tk.NONE)
@@ -747,6 +780,25 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if path:
             self.rtz_path_var.set(path)
 
+    def browse_batch_planned_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select planned RTZ",
+            initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT),
+            filetypes=[("RTZ files", "*.rtz"), ("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if path:
+            self.batch_planned_path_var.set(path)
+
+    def browse_batch_optimal_dir(self) -> None:
+        path = filedialog.askdirectory(title="Select optimal RTZ folder", initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT))
+        if path:
+            self.batch_optimal_dir_var.set(path)
+
+    def browse_batch_output_dir(self) -> None:
+        path = filedialog.askdirectory(title="Select ABB output RTZ folder", initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT))
+        if path:
+            self.batch_output_dir_var.set(path)
+
     def convert_rtz_to_request(self) -> None:
         try:
             path = self.rtz_path_var.get().strip()
@@ -771,27 +823,40 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         namespace = {"rtz": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
         waypoint_path = ".//rtz:waypoint" if namespace else ".//waypoint"
         position_path = "rtz:position" if namespace else "position"
-        schedule_path = ".//rtz:scheduleElement" if namespace else ".//scheduleElement"
+        schedule_paths = (
+            [".//rtz:scheduleElement", ".//rtz:sheduleElement"] if namespace else [".//scheduleElement", ".//sheduleElement"]
+        )
+        vo_path = ".//rtz:VOElement" if namespace else ".//VOElement"
 
         schedule_by_waypoint: Dict[str, Dict[str, Any]] = {}
         speeds = []
         etd = None
         eta = None
-        for item in root.findall(schedule_path, namespace):
+        for schedule_path in schedule_paths:
+            for item in root.findall(schedule_path, namespace):
+                waypoint_id = item.attrib.get("waypointId")
+                waypoint_schedule: Dict[str, Any] = {}
+                if item.attrib.get("speed"):
+                    speed = float(item.attrib["speed"])
+                    speeds.append(speed)
+                    waypoint_schedule["speed"] = speed
+                if item.attrib.get("etd"):
+                    waypoint_schedule["etd"] = item.attrib["etd"]
+                if item.attrib.get("eta"):
+                    waypoint_schedule["eta"] = item.attrib["eta"]
+                if waypoint_id:
+                    schedule_by_waypoint[waypoint_id] = waypoint_schedule
+                etd = etd or item.attrib.get("etd")
+                eta = item.attrib.get("eta") or eta
+
+        for item in root.findall(vo_path, namespace):
             waypoint_id = item.attrib.get("waypointId")
-            waypoint_schedule: Dict[str, Any] = {}
-            if item.attrib.get("speed"):
+            if waypoint_id and item.attrib.get("speed"):
                 speed = float(item.attrib["speed"])
-                speeds.append(speed)
-                waypoint_schedule["speed"] = speed
-            if item.attrib.get("etd"):
-                waypoint_schedule["etd"] = item.attrib["etd"]
-            if item.attrib.get("eta"):
-                waypoint_schedule["eta"] = item.attrib["eta"]
-            if waypoint_id:
-                schedule_by_waypoint[waypoint_id] = waypoint_schedule
-            etd = etd or item.attrib.get("etd")
-            eta = item.attrib.get("eta") or eta
+                waypoint_schedule = schedule_by_waypoint.setdefault(waypoint_id, {})
+                if "speed" not in waypoint_schedule:
+                    waypoint_schedule["speed"] = speed
+                    speeds.append(speed)
 
         points = []
         for waypoint in root.findall(waypoint_path, namespace):
@@ -840,6 +905,348 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             payload["etd"], payload["eta"] = _realistic_etd_eta(schedule.get("etd"), schedule.get("eta"))
             payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
         return payload
+
+    def start_continuous_optimal_batch(self) -> None:
+        if self.batch_running:
+            messagebox.showinfo("Optimal RTZ Batch", "A batch is already running.")
+            return
+        self.batch_stop_event.clear()
+        threading.Thread(target=self._run_continuous_optimal_batch, daemon=True).start()
+
+    def stop_continuous_optimal_batch(self) -> None:
+        self.batch_stop_event.set()
+        self.log("Continuous optimal RTZ batch stop requested.")
+
+    def _run_continuous_optimal_batch(self) -> None:
+        self.batch_running = True
+        try:
+            planned_path = Path(self.batch_planned_path_var.get().strip())
+            optimal_dir = Path(self.batch_optimal_dir_var.get().strip())
+            output_dir = Path(self.batch_output_dir_var.get().strip())
+            if not planned_path.exists():
+                raise ValueError(f"Planned RTZ not found: {planned_path}")
+            if not optimal_dir.exists():
+                raise ValueError(f"Optimal RTZ folder not found: {optimal_dir}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            planned_points, planned_schedule = self._parse_rtz(planned_path)
+            if len(planned_points) < 2:
+                raise ValueError("Planned RTZ must contain at least two waypoints.")
+
+            optimal_files = self._optimal_rtz_files(optimal_dir)
+            limit = self._batch_limit()
+            if limit:
+                optimal_files = optimal_files[:limit]
+
+            entries = [{"source": planned_path, "points": planned_points, "schedule": planned_schedule, "sequence": 0}]
+            for sequence, optimal_path in enumerate(optimal_files, start=1):
+                optimal_points, optimal_schedule = self._parse_rtz(optimal_path)
+                if not optimal_points:
+                    self.log(f"Skipping empty optimal RTZ: {optimal_path.name}")
+                    continue
+                remaining_points = self._remaining_planned_points(planned_points, optimal_points[0])
+                if len(remaining_points) < 2:
+                    self.log(f"Skipping {optimal_path.name}: no remaining planned waypoints after current position.")
+                    continue
+                schedule = dict(optimal_schedule)
+                metadata = self._rtz_file_metadata(optimal_path)
+                if metadata.get("timestamp_iso"):
+                    schedule["etd"] = metadata["timestamp_iso"]
+                entries.append({"source": optimal_path, "points": remaining_points, "schedule": schedule, "sequence": sequence})
+
+            self.log(f"Continuous optimal RTZ batch prepared: {len(entries)} requests ({len(optimal_files)} optimal files scanned).")
+            for index, entry in enumerate(entries, start=1):
+                if self.batch_stop_event.is_set():
+                    self.log("Continuous optimal RTZ batch stopped.")
+                    break
+
+                source_path = entry["source"]
+                payload = self._build_rtz_request("Optimal set speed", entry["points"], entry["schedule"])
+                metadata = self._rtz_file_metadata(source_path)
+                payload["id"] = f"abb-optimal-{metadata.get('timestamp_label') or index}"
+                if metadata.get("timestamp_iso"):
+                    payload["etd"] = metadata["timestamp_iso"]
+
+                output_name = self._batch_output_name(source_path)
+                output_path = output_dir / output_name
+                self.log(f"[{index}/{len(entries)}] Requesting Optimal set speed from {source_path.name} -> {output_name}")
+                response_data = self._send_ws_request_sync("Optimal set speed", payload)
+                route_data = self._download_route_response(response_data) or response_data
+                route_points = self._extract_route_points_for_rtz(route_data)
+                if len(route_points) < 2:
+                    raw_path = output_path.with_suffix(".response.json")
+                    raw_path.write_text(json.dumps(route_data, indent=2), encoding="utf-8")
+                    self.log(f"No route geometry found. Response saved: {raw_path}")
+                    continue
+                self._write_rtz(output_path, route_points, route_name=output_path.stem)
+                self.log(f"Saved RTZ: {output_path} ({len(route_points)} waypoints)")
+            self.log("Continuous optimal RTZ batch finished.")
+        except Exception as exc:
+            self.log(f"ERROR: {exc}")
+            messagebox.showerror("Optimal RTZ Batch Error", str(exc))
+        finally:
+            self.batch_running = False
+
+    def _batch_limit(self) -> int:
+        try:
+            value = int(self.batch_limit_var.get())
+        except ValueError:
+            return 0
+        return max(0, value)
+
+    def _optimal_rtz_files(self, optimal_dir: Path) -> List[Path]:
+        return sorted(optimal_dir.glob("*.rtz"), key=lambda path: (self._rtz_file_metadata(path).get("timestamp_sort") or path.name, path.name))
+
+    def _rtz_file_metadata(self, path: Path) -> Dict[str, Any]:
+        match = RTZ_FILE_NAME_RE.match(path.name)
+        if not match:
+            return {"kind": "", "timestamp_label": "", "timestamp_iso": "", "timestamp_sort": path.name}
+        label = f"{match.group('date')}_{match.group('time')}"
+        dt = datetime.strptime(match.group("date") + match.group("time"), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        return {
+            "imo": match.group("imo"),
+            "kind": match.group("kind"),
+            "timestamp_label": label,
+            "timestamp_iso": _utc_z(dt),
+            "timestamp_sort": dt,
+        }
+
+    def _batch_output_name(self, source_path: Path) -> str:
+        metadata = self._rtz_file_metadata(source_path)
+        if metadata.get("imo") and metadata.get("timestamp_label"):
+            return f"{metadata['imo']}_SAS_Optimal_{metadata['timestamp_label']}.rtz"
+        return f"{source_path.stem}_Optimal.rtz"
+
+    def _remaining_planned_points(self, planned_points: List[Dict[str, Any]], current_point: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if len(planned_points) < 2:
+            return planned_points
+        current_lat, current_lng = self._feature_lat_lng(current_point)
+        best_index = 0
+        best_score = float("inf")
+        for index in range(len(planned_points) - 1):
+            start_lat, start_lng = self._feature_lat_lng(planned_points[index])
+            end_lat, end_lng = self._feature_lat_lng(planned_points[index + 1])
+            score = self._point_segment_score(current_lat, current_lng, start_lat, start_lng, end_lat, end_lng)
+            if score < best_score:
+                best_score = score
+                best_index = index
+        cut_index = min(best_index + 1, len(planned_points) - 1)
+        if self._distance_nm(current_point, planned_points[cut_index]) < 0.2 and cut_index + 1 < len(planned_points):
+            cut_index += 1
+        current_feature = json.loads(json.dumps(current_point))
+        current_feature.setdefault("properties", {})
+        if isinstance(current_feature["properties"], dict):
+            current_feature["properties"]["name"] = current_feature["properties"].get("name") or "Current position"
+        return [current_feature] + json.loads(json.dumps(planned_points[cut_index:]))
+
+    def _feature_lat_lng(self, feature: Dict[str, Any]) -> Tuple[float, float]:
+        coordinates = feature["geometry"]["coordinates"]
+        return float(coordinates[1]), float(coordinates[0])
+
+    def _point_segment_score(
+        self,
+        point_lat: float,
+        point_lng: float,
+        start_lat: float,
+        start_lng: float,
+        end_lat: float,
+        end_lng: float,
+    ) -> float:
+        scale = math.cos(math.radians((point_lat + start_lat + end_lat) / 3))
+        end_lng = start_lng + ((end_lng - start_lng + 180) % 360) - 180
+        point_lng = start_lng + ((point_lng - start_lng + 180) % 360) - 180
+        px, py = point_lng * scale, point_lat
+        sx, sy = start_lng * scale, start_lat
+        ex, ey = end_lng * scale, end_lat
+        dx, dy = ex - sx, ey - sy
+        if dx == 0 and dy == 0:
+            return (px - sx) ** 2 + (py - sy) ** 2
+        fraction = max(0.0, min(1.0, ((px - sx) * dx + (py - sy) * dy) / (dx * dx + dy * dy)))
+        closest_x = sx + fraction * dx
+        closest_y = sy + fraction * dy
+        return (px - closest_x) ** 2 + (py - closest_y) ** 2
+
+    def _distance_nm(self, first: Dict[str, Any], second: Dict[str, Any]) -> float:
+        lat1, lng1 = self._feature_lat_lng(first)
+        lat2, lng2 = self._feature_lat_lng(second)
+        radius_nm = 3440.065
+        d_lat = math.radians(lat2 - lat1)
+        d_lng = math.radians(((lng2 - lng1 + 180) % 360) - 180)
+        a = math.sin(d_lat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(d_lng / 2) ** 2
+        return radius_nm * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
+
+    def _send_ws_request_sync(self, endpoint_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        path, _scope = VESSEL_ASYNC_ENDPOINTS[endpoint_name]
+        url = self.ws_base_var.get().rstrip("/") + path
+        headers = [
+            f"Authorization: Bearer {self._require_token()}",
+            f"client_id: {self.ws_client_id_var.get().strip()}",
+        ]
+        ws = websocket.create_connection(url, header=headers, timeout=30)
+        ws.settimeout(VESSEL_WS_RESPONSE_TIMEOUT_SECONDS)
+        messages = []
+        try:
+            ws.send(json.dumps(payload))
+            while True:
+                parsed = json.loads(ws.recv())
+                messages.append(parsed)
+                status = str(parsed.get("status", "")).lower()
+                if status in {"finished", "failed", "success", "completed"}:
+                    break
+                if any(key in parsed for key in ("url", "downloadUrl", "responseUrl")):
+                    break
+        finally:
+            ws.close()
+        latest = messages[-1] if messages else {}
+        return {"webSocketMessages": messages, "latestMessage": latest}
+
+    def _download_route_response(self, response_data: Dict[str, Any]) -> Optional[Any]:
+        urls = self._find_download_urls(response_data)
+        if not urls:
+            return None
+        url = urls[0]
+        self.log(f"Downloading route response: {url}")
+        resp = requests.get(url, timeout=120)
+        self.log(f"Route download HTTP {resp.status_code}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def _find_download_urls(self, data: Any) -> List[str]:
+        urls: List[str] = []
+        seen = set()
+
+        def visit(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if key in {"downloadUrl", "responseUrl", "url"} and isinstance(value, str) and value.startswith(("http://", "https://")):
+                        if value not in seen:
+                            seen.add(value)
+                            urls.append(value)
+                    else:
+                        visit(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+
+        visit(data)
+        return urls
+
+    def _extract_route_points_for_rtz(self, data: Any) -> List[Dict[str, Any]]:
+        candidates: List[List[Dict[str, Any]]] = []
+
+        def coord_pair(value: Any) -> Optional[Tuple[float, float]]:
+            if isinstance(value, list) and len(value) >= 2 and isinstance(value[0], (int, float)) and isinstance(value[1], (int, float)):
+                lon, lat = float(value[0]), float(value[1])
+                if -180 <= lon <= 180 and -90 <= lat <= 90:
+                    return lat, lon
+            return None
+
+        def speed_value(obj: Any) -> Optional[float]:
+            if not isinstance(obj, dict):
+                return None
+            for key in ("speed", "speedOverGround", "speedKnots", "sog", "plannedSpeed"):
+                value = obj.get(key)
+                if isinstance(value, (int, float)):
+                    return float(value)
+            props = obj.get("properties")
+            return speed_value(props) if isinstance(props, dict) else None
+
+        def feature_from_point(obj: Any, index: int) -> Optional[Dict[str, Any]]:
+            if not isinstance(obj, dict):
+                return None
+            geometry = obj.get("geometry") if isinstance(obj.get("geometry"), dict) else {}
+            pair = coord_pair(geometry.get("coordinates"))
+            if pair is None:
+                return None
+            lat, lon = pair
+            props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
+            properties = {"name": str(props.get("name") or obj.get("name") or f"WP {index}")}
+            speed = speed_value(obj)
+            if speed is not None:
+                properties["speed"] = speed
+            for key in ("eta", "etd", "time", "timestamp"):
+                if props.get(key):
+                    properties[key] = props[key]
+            return {"type": "Feature", "properties": properties, "geometry": {"type": "Point", "coordinates": [lon, lat]}}
+
+        def visit(obj: Any) -> None:
+            if isinstance(obj, dict):
+                geometry = obj.get("geometry") if isinstance(obj.get("geometry"), dict) else {}
+                coords = geometry.get("coordinates")
+                if geometry.get("type") == "LineString" and isinstance(coords, list):
+                    line_points = []
+                    for index, item in enumerate(coords, start=1):
+                        pair = coord_pair(item)
+                        if pair:
+                            lat, lon = pair
+                            line_points.append({"type": "Feature", "properties": {"name": f"WP {index}"}, "geometry": {"type": "Point", "coordinates": [lon, lat]}})
+                    if len(line_points) >= 2:
+                        candidates.append(line_points)
+                points = obj.get("points")
+                if isinstance(points, list):
+                    route_points = [point for index, item in enumerate(points, start=1) if (point := feature_from_point(item, index))]
+                    if len(route_points) >= 2:
+                        candidates.append(route_points)
+                for value in obj.values():
+                    visit(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+
+        visit(data)
+        return max(candidates, key=len) if candidates else []
+
+    def _write_rtz(self, output_path: Path, route_points: List[Dict[str, Any]], route_name: str) -> None:
+        namespace = "http://www.cirm.org/RTZ/1/0"
+        ET.register_namespace("", namespace)
+        route = ET.Element(f"{{{namespace}}}route", {"version": "1.0"})
+        ET.SubElement(route, f"{{{namespace}}}routeInfo", {"routeName": route_name})
+        waypoints = ET.SubElement(route, f"{{{namespace}}}waypoints")
+        has_schedule = False
+        speeds_by_index: Dict[int, float] = {}
+        times_by_index: Dict[int, Dict[str, str]] = {}
+
+        for index, point in enumerate(route_points):
+            lat, lon = self._feature_lat_lng(point)
+            props = point.get("properties") if isinstance(point.get("properties"), dict) else {}
+            waypoint = ET.SubElement(waypoints, f"{{{namespace}}}waypoint", {"id": str(index), "name": str(props.get("name") or ""), "radius": "0.50"})
+            ET.SubElement(waypoint, f"{{{namespace}}}position", {"lat": self._fmt_coord(lat), "lon": self._fmt_coord(lon)})
+            geometry_type = "Loxodrome" if props.get("forceRhumbLine") else "Orthodrome"
+            ET.SubElement(waypoint, f"{{{namespace}}}leg", {"starboardXTD": "0.03", "portsideXTD": "0.03", "geometryType": geometry_type})
+            if isinstance(props.get("speed"), (int, float)):
+                speeds_by_index[index] = float(props["speed"])
+                has_schedule = True
+            time_attrs = {key: str(props[key]) for key in ("etd", "eta") if props.get(key)}
+            if time_attrs:
+                times_by_index[index] = time_attrs
+                has_schedule = True
+
+        if has_schedule:
+            schedules = ET.SubElement(route, f"{{{namespace}}}schedules")
+            schedule = ET.SubElement(schedules, f"{{{namespace}}}schedule", {"id": "0"})
+            calculated = ET.SubElement(schedule, f"{{{namespace}}}calculated")
+            for index in range(len(route_points)):
+                attrs = {"waypointId": str(index)}
+                if index in speeds_by_index:
+                    attrs["speed"] = self._fmt_float(speeds_by_index[index])
+                attrs.update(times_by_index.get(index, {}))
+                ET.SubElement(calculated, f"{{{namespace}}}scheduleElement", attrs)
+
+        if speeds_by_index:
+            extensions = ET.SubElement(route, f"{{{namespace}}}extensions")
+            extension = ET.SubElement(extensions, f"{{{namespace}}}extension")
+            vo = ET.SubElement(extension, f"{{{namespace}}}VoyageOptimization")
+            for index, speed in speeds_by_index.items():
+                ET.SubElement(vo, f"{{{namespace}}}VOElement", {"waypointId": str(index), "usingspeed": "0", "speed": self._fmt_float(speed)})
+
+        ET.indent(route, space="    ")
+        ET.ElementTree(route).write(output_path, encoding="UTF-8", xml_declaration=True)
+
+    def _fmt_coord(self, value: float) -> str:
+        return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    def _fmt_float(self, value: float) -> str:
+        return f"{value:.6f}".rstrip("0").rstrip(".")
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._require_token()}", "Accept": "application/json"}
