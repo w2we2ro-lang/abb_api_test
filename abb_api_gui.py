@@ -988,19 +988,22 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     break
 
                 source_path = entry["source"]
-                payload = self._build_rtz_request("Optimal set speed", entry["points"], entry["schedule"])
                 metadata = self._rtz_file_metadata(source_path)
+                output_name = self._batch_output_name(source_path)
+                output_path = output_dir / output_name
+                request_path = output_path.with_suffix(".request.json")
+                websocket_path = output_path.with_suffix(".websocket.json")
+                response_path = output_path.with_suffix(".response.json")
+                if self._resume_batch_output_if_possible(output_path, websocket_path, response_path, rpm_sog_profile):
+                    continue
+
+                payload = self._build_rtz_request("Optimal set speed", entry["points"], entry["schedule"])
                 payload["id"] = f"abb-optimal-{metadata.get('timestamp_label') or index}"
                 if metadata.get("timestamp_iso"):
                     payload["etd"] = metadata["timestamp_iso"]
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
 
-                output_name = self._batch_output_name(source_path)
-                output_path = output_dir / output_name
-                request_path = output_path.with_suffix(".request.json")
-                websocket_path = output_path.with_suffix(".websocket.json")
-                response_path = output_path.with_suffix(".response.json")
                 self._write_batch_json(request_path, payload)
                 self.log(f"[{index}/{len(entries)}] Requesting Optimal set speed from {source_path.name} -> {output_name}")
                 response_data = self._send_ws_request_sync("Optimal set speed", payload)
@@ -1056,6 +1059,54 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def _write_batch_json(self, path: Path, data: Any) -> None:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _read_batch_json(self, path: Path) -> Any:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _resume_batch_output_if_possible(
+        self,
+        output_path: Path,
+        websocket_path: Path,
+        response_path: Path,
+        rpm_sog_profile: Optional[Dict[str, Any]],
+    ) -> bool:
+        if output_path.exists() and output_path.stat().st_size > 0:
+            self.log(f"Resume: existing RTZ found. Skipping API request: {output_path.name}")
+            return True
+
+        route_data = None
+        source_path = None
+        if response_path.exists() and response_path.stat().st_size > 0:
+            try:
+                route_data = self._read_batch_json(response_path)
+                source_path = response_path
+            except Exception as exc:
+                self.log(f"Resume: existing response JSON could not be read. Request will be retried: {response_path.name} ({exc})")
+        elif websocket_path.exists() and websocket_path.stat().st_size > 0:
+            try:
+                websocket_data = self._read_batch_json(websocket_path)
+                route_data = self._download_route_response(websocket_data) or websocket_data
+                self._write_batch_json(response_path, route_data)
+                source_path = response_path
+                self.log(f"Resume: response JSON recovered from existing WebSocket JSON: {response_path.name}")
+            except Exception as exc:
+                self.log(f"Resume: existing WebSocket JSON could not be reused. Request will be retried: {websocket_path.name} ({exc})")
+
+        if route_data is None:
+            return False
+
+        route_points = self._extract_route_points_for_rtz(route_data)
+        if len(route_points) < 2:
+            source_name = source_path.name if source_path else response_path.name
+            self.log(f"Resume: existing JSON has no route geometry. Request will be retried: {source_name}")
+            return False
+
+        if rpm_sog_profile:
+            rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
+            self.log(f"Resume: applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
+        self._write_rtz(output_path, route_points, route_name=output_path.stem)
+        self.log(f"Resume: rebuilt RTZ from existing JSON: {output_path} ({len(route_points)} waypoints)")
+        return True
 
     def _build_rpm_sog_profile(self, optimal_files: List[Path]) -> Optional[Dict[str, Any]]:
         pairs: List[Tuple[float, float]] = []
