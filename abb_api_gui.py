@@ -266,6 +266,20 @@ VESSEL_SAMPLE_CONFIG = {
     "groundingCheckMode": "Off",
 }
 
+OPTIMAL_BATCH_VESSEL_PARAMETERS = {
+    "imo": "9935208",
+    "vesselType": "ContainerVessel",
+    "measurements": {
+        "beam": 51,
+        "lengthOverall": 366,
+    },
+}
+
+OPTIMAL_BATCH_CONFIG = {
+    "hoursBetweenRouteWaypoints": 3,
+    "minimumHoursBetweenSpeedChanges": 3,
+}
+
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
     "Instructed set speed": {
@@ -1003,6 +1017,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     payload["etd"] = metadata["timestamp_iso"]
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
+                payload = self._minimal_optimal_batch_payload(payload)
 
                 self._write_batch_json(request_path, payload)
                 self.log(f"[{index}/{len(entries)}] Requesting Optimal set speed from {source_path.name} -> {output_name}")
@@ -1062,6 +1077,16 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def _read_batch_json(self, path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _minimal_optimal_batch_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        minimal: Dict[str, Any] = {}
+        for key in ("id", "points", "voyage", "etd", "weatherSource", "speeds"):
+            if key in payload:
+                minimal[key] = payload[key]
+        minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
+        minimal["optimizationType"] = "Fuel"
+        minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
+        return minimal
 
     def _resume_batch_output_if_possible(
         self,
