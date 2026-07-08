@@ -304,6 +304,15 @@ OPTIMAL_BATCH_CONFIG = {
 }
 
 OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 10, "maximum": 25}
+BATCH_INSTRUCTED_SPEED = round((OPTIMAL_BATCH_SPEED_RANGE["minimum"] + OPTIMAL_BATCH_SPEED_RANGE["maximum"]) / 2, 1)
+BATCH_SPEED_RANGE_ENDPOINTS = {"Recommended set speed", "Fixed ETA", "Optimal set speed"}
+BATCH_OUTPUT_KINDS = {
+    "Shortest path": "ShortestPath",
+    "Instructed set speed": "InstructedSpeed",
+    "Recommended set speed": "RecommendedSpeed",
+    "Fixed ETA": "FixedETA",
+    "Optimal set speed": "Optimal",
+}
 
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
     "Shortest path": DEFAULT_SHORTEST_PATH_REQUEST,
@@ -777,25 +786,34 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(rtz_frame, text="Convert RTZ", command=self.convert_rtz_to_request).grid(row=1, column=1, padx=5, pady=5)
         rtz_frame.columnconfigure(0, weight=1)
 
-        batch_frame = ttk.LabelFrame(left, text="Continuous Optimal RTZ Batch")
+        batch_frame = ttk.LabelFrame(left, text="Continuous RTZ Batch")
         batch_frame.pack(fill=tk.X, pady=(0, 8))
         self.batch_planned_path_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_PLANNED_RTZ))
         self.batch_optimal_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
         self.batch_output_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
+        self.batch_endpoint_var = tk.StringVar(value="Optimal set speed")
         self.batch_limit_var = tk.StringVar(value="0")
         ttk.Label(batch_frame, text="Planned RTZ").grid(row=0, column=0, sticky="w", padx=5, pady=3)
         ttk.Entry(batch_frame, textvariable=self.batch_planned_path_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
         ttk.Button(batch_frame, text="Browse", command=self.browse_batch_planned_file).grid(row=0, column=2, padx=5, pady=3)
-        ttk.Label(batch_frame, text="Optimal folder").grid(row=1, column=0, sticky="w", padx=5, pady=3)
+        ttk.Label(batch_frame, text="Reference optimal folder").grid(row=1, column=0, sticky="w", padx=5, pady=3)
         ttk.Entry(batch_frame, textvariable=self.batch_optimal_dir_var).grid(row=1, column=1, sticky="we", padx=5, pady=3)
         ttk.Button(batch_frame, text="Browse", command=self.browse_batch_optimal_dir).grid(row=1, column=2, padx=5, pady=3)
         ttk.Label(batch_frame, text="Output folder").grid(row=2, column=0, sticky="w", padx=5, pady=3)
         ttk.Entry(batch_frame, textvariable=self.batch_output_dir_var).grid(row=2, column=1, sticky="we", padx=5, pady=3)
         ttk.Button(batch_frame, text="Browse", command=self.browse_batch_output_dir).grid(row=2, column=2, padx=5, pady=3)
-        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=3, column=0, sticky="w", padx=5, pady=3)
-        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=3, column=1, sticky="w", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Start Optimal Batch", command=self.start_continuous_optimal_batch).grid(row=3, column=1, sticky="e", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=3, column=2, padx=5, pady=3)
+        ttk.Label(batch_frame, text="Batch request").grid(row=3, column=0, sticky="w", padx=5, pady=3)
+        ttk.Combobox(
+            batch_frame,
+            textvariable=self.batch_endpoint_var,
+            values=list(VESSEL_ASYNC_ENDPOINTS.keys()),
+            state="readonly",
+            width=28,
+        ).grid(row=3, column=1, sticky="w", padx=5, pady=3)
+        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=4, column=0, sticky="w", padx=5, pady=3)
+        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=4, column=1, sticky="w", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Start Batch", command=self.start_continuous_optimal_batch).grid(row=4, column=1, sticky="e", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=4, column=2, padx=5, pady=3)
         batch_frame.columnconfigure(1, weight=1)
 
         req_frame = ttk.LabelFrame(left, text="Route Request JSON")
@@ -963,18 +981,21 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def start_continuous_optimal_batch(self) -> None:
         if self.batch_running:
-            messagebox.showinfo("Optimal RTZ Batch", "A batch is already running.")
+            messagebox.showinfo("Continuous RTZ Batch", "A batch is already running.")
             return
         self.batch_stop_event.clear()
         threading.Thread(target=self._run_continuous_optimal_batch, daemon=True).start()
 
     def stop_continuous_optimal_batch(self) -> None:
         self.batch_stop_event.set()
-        self.log("Continuous optimal RTZ batch stop requested.")
+        self.log("Continuous RTZ batch stop requested.")
 
     def _run_continuous_optimal_batch(self) -> None:
         self.batch_running = True
         try:
+            endpoint_name = self.batch_endpoint_var.get().strip()
+            if endpoint_name not in VESSEL_ASYNC_ENDPOINTS:
+                raise ValueError(f"Unsupported batch request type: {endpoint_name}")
             planned_path = Path(self.batch_planned_path_var.get().strip())
             optimal_dir = Path(self.batch_optimal_dir_var.get().strip())
             output_dir = Path(self.batch_output_dir_var.get().strip())
@@ -1021,15 +1042,18 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     schedule["weatherSource"] = {"type": "Forecast", "version": metadata["timestamp_iso"]}
                 entries.append({"source": optimal_path, "points": remaining_points, "schedule": schedule, "sequence": sequence})
 
-            self.log(f"Continuous optimal RTZ batch prepared: {len(entries)} requests for {len(optimal_files)} optimal files.")
+            self.log(
+                f"Continuous RTZ batch prepared: {len(entries)} {endpoint_name} requests "
+                f"for {len(optimal_files)} reference optimal files."
+            )
             for index, entry in enumerate(entries, start=1):
                 if self.batch_stop_event.is_set():
-                    self.log("Continuous optimal RTZ batch stopped.")
+                    self.log("Continuous RTZ batch stopped.")
                     break
 
                 source_path = entry["source"]
                 metadata = self._rtz_file_metadata(source_path)
-                output_name = self._batch_output_name(source_path)
+                output_name = self._batch_output_name(source_path, endpoint_name)
                 output_path = output_dir / output_name
                 request_path = output_path.with_suffix(".request.json")
                 websocket_path = output_path.with_suffix(".websocket.json")
@@ -1037,16 +1061,21 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 if self._resume_batch_output_if_possible(output_path, websocket_path, response_path, rpm_sog_profile):
                     continue
 
-                payload = self._build_rtz_request("Optimal set speed", entry["points"], entry["schedule"])
-                payload["id"] = f"abb-optimal-{metadata.get('timestamp_label') or index}"
+                payload = self._build_rtz_request(endpoint_name, entry["points"], entry["schedule"])
+                payload["id"] = f"abb-{self._batch_endpoint_slug(endpoint_name)}-{metadata.get('timestamp_label') or index}"
                 if metadata.get("timestamp_iso"):
                     payload["etd"] = metadata["timestamp_iso"]
+                    if endpoint_name == "Fixed ETA":
+                        etd = _parse_utc(metadata["timestamp_iso"])
+                        if etd:
+                            payload["eta"] = _utc_z(etd + timedelta(days=FIXED_ETA_DURATION_DAYS))
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
-                payload = self._minimal_optimal_batch_payload(payload)
+                payload = self._minimal_batch_payload(payload, endpoint_name)
 
                 self._write_batch_json(request_path, payload)
                 self._run_optimal_batch_request_with_retries(
+                    endpoint_name,
                     index,
                     len(entries),
                     source_path,
@@ -1057,10 +1086,10 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     response_path,
                     rpm_sog_profile,
                 )
-            self.log("Continuous optimal RTZ batch finished.")
+            self.log("Continuous RTZ batch finished.")
         except Exception as exc:
             self.log(f"ERROR: {exc}")
-            messagebox.showerror("Optimal RTZ Batch Error", str(exc))
+            messagebox.showerror("Continuous RTZ Batch Error", str(exc))
         finally:
             self.batch_running = False
 
@@ -1088,11 +1117,15 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             "timestamp_sort": dt,
         }
 
-    def _batch_output_name(self, source_path: Path) -> str:
+    def _batch_output_name(self, source_path: Path, endpoint_name: str) -> str:
         metadata = self._rtz_file_metadata(source_path)
+        output_kind = BATCH_OUTPUT_KINDS.get(endpoint_name, self._batch_endpoint_slug(endpoint_name))
         if metadata.get("imo") and metadata.get("timestamp_label"):
-            return f"{metadata['imo']}_SAS_Optimal_{metadata['timestamp_label']}.rtz"
-        return f"{source_path.stem}_Optimal.rtz"
+            return f"{metadata['imo']}_SAS_{output_kind}_{metadata['timestamp_label']}.rtz"
+        return f"{source_path.stem}_{output_kind}.rtz"
+
+    def _batch_endpoint_slug(self, endpoint_name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", endpoint_name.lower()).strip("-") or "batch"
 
     def _write_batch_json(self, path: Path, data: Any) -> None:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1102,6 +1135,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def _run_optimal_batch_request_with_retries(
         self,
+        endpoint_name: str,
         index: int,
         total: int,
         source_path: Path,
@@ -1114,14 +1148,14 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
     ) -> None:
         for attempt in range(1, OPTIMAL_BATCH_RETRY_ATTEMPTS + 1):
             if self.batch_stop_event.is_set():
-                self.log("Continuous optimal RTZ batch stopped.")
+                self.log("Continuous RTZ batch stopped.")
                 return
             try:
                 if self._resume_batch_output_if_possible(output_path, websocket_path, response_path, rpm_sog_profile):
                     return
                 retry_text = "" if attempt == 1 else f" (retry {attempt}/{OPTIMAL_BATCH_RETRY_ATTEMPTS})"
-                self.log(f"[{index}/{total}] Requesting Optimal set speed from {source_path.name} -> {output_name}{retry_text}")
-                response_data = self._send_ws_request_sync("Optimal set speed", payload)
+                self.log(f"[{index}/{total}] Requesting {endpoint_name} from {source_path.name} -> {output_name}{retry_text}")
+                response_data = self._send_ws_request_sync(endpoint_name, payload)
                 self._write_batch_json(websocket_path, response_data)
                 route_data = self._download_route_response(response_data) or response_data
                 self._write_batch_json(response_path, route_data)
@@ -1138,7 +1172,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     f"({attempt}/{OPTIMAL_BATCH_RETRY_ATTEMPTS})."
                 )
                 if self.batch_stop_event.wait(OPTIMAL_BATCH_RETRY_DELAY_SECONDS):
-                    self.log("Continuous optimal RTZ batch stopped.")
+                    self.log("Continuous RTZ batch stopped.")
                     return
 
     def _save_optimal_batch_route(
@@ -1166,12 +1200,16 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         text = str(exc)
         return "10054" in text or "connection reset" in text.lower()
 
-    def _minimal_optimal_batch_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _minimal_batch_payload(self, payload: Dict[str, Any], endpoint_name: str) -> Dict[str, Any]:
         minimal: Dict[str, Any] = {}
+        if endpoint_name == "Shortest path" and "type" in payload:
+            minimal["type"] = json.loads(json.dumps(payload["type"]))
         if "id" in payload:
             minimal["id"] = json.loads(json.dumps(payload["id"]))
         if "points" in payload:
             minimal["points"] = self._sanitize_batch_points(payload["points"])
+        if endpoint_name == "Shortest path":
+            return minimal
         if "voyage" in payload:
             voyage = json.loads(json.dumps(payload["voyage"]))
             if isinstance(voyage, dict) and isinstance(voyage.get("ports"), list):
@@ -1180,7 +1218,12 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         for key in ("etd", "weatherSource"):
             if key in payload:
                 minimal[key] = json.loads(json.dumps(payload[key]))
-        minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
+        if endpoint_name == "Fixed ETA" and "eta" in payload:
+            minimal["eta"] = json.loads(json.dumps(payload["eta"]))
+        if endpoint_name == "Instructed set speed":
+            minimal["speed"] = BATCH_INSTRUCTED_SPEED
+        elif endpoint_name in BATCH_SPEED_RANGE_ENDPOINTS:
+            minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
         minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
         minimal["optimizationType"] = "Fuel"
         minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
