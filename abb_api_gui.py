@@ -943,23 +943,22 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             if limit:
                 optimal_files = optimal_files[:limit]
 
-            entries = [{"source": planned_path, "points": planned_points, "schedule": planned_schedule, "sequence": 0}]
+            entries = []
             for sequence, optimal_path in enumerate(optimal_files, start=1):
                 optimal_points, optimal_schedule = self._parse_rtz(optimal_path)
                 if not optimal_points:
-                    self.log(f"Skipping empty optimal RTZ: {optimal_path.name}")
-                    continue
+                    raise ValueError(f"Optimal RTZ has no waypoint: {optimal_path}")
                 remaining_points = self._remaining_planned_points(planned_points, optimal_points[0])
                 if len(remaining_points) < 2:
-                    self.log(f"Skipping {optimal_path.name}: no remaining planned waypoints after current position.")
-                    continue
+                    raise ValueError(f"Could not build at least two waypoints for: {optimal_path}")
                 schedule = dict(optimal_schedule)
                 metadata = self._rtz_file_metadata(optimal_path)
                 if metadata.get("timestamp_iso"):
                     schedule["etd"] = metadata["timestamp_iso"]
+                    schedule["weatherSource"] = {"type": "Forecast", "version": metadata["timestamp_iso"]}
                 entries.append({"source": optimal_path, "points": remaining_points, "schedule": schedule, "sequence": sequence})
 
-            self.log(f"Continuous optimal RTZ batch prepared: {len(entries)} requests ({len(optimal_files)} optimal files scanned).")
+            self.log(f"Continuous optimal RTZ batch prepared: {len(entries)} requests for {len(optimal_files)} optimal files.")
             for index, entry in enumerate(entries, start=1):
                 if self.batch_stop_event.is_set():
                     self.log("Continuous optimal RTZ batch stopped.")
@@ -971,6 +970,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 payload["id"] = f"abb-optimal-{metadata.get('timestamp_label') or index}"
                 if metadata.get("timestamp_iso"):
                     payload["etd"] = metadata["timestamp_iso"]
+                if entry["schedule"].get("weatherSource"):
+                    payload["weatherSource"] = entry["schedule"]["weatherSource"]
 
                 output_name = self._batch_output_name(source_path)
                 output_path = output_dir / output_name
