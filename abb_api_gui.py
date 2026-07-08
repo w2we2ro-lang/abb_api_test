@@ -277,7 +277,7 @@ OPTIMAL_BATCH_VESSEL_PARAMETERS = {
 
 OPTIMAL_BATCH_CONFIG = {
     "hoursBetweenRouteWaypoints": 3,
-    "minimumHoursBetweenSpeedChanges": 3,
+    "minimumHoursBetweenSpeedChanges": 6,
 }
 
 VESSEL_ASYNC_SAMPLES: Dict[str, Dict[str, Any]] = {
@@ -1080,13 +1080,57 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
     def _minimal_optimal_batch_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         minimal: Dict[str, Any] = {}
-        for key in ("id", "points", "voyage", "etd", "weatherSource", "speeds"):
+        if "id" in payload:
+            minimal["id"] = json.loads(json.dumps(payload["id"]))
+        if "points" in payload:
+            minimal["points"] = self._sanitize_batch_points(payload["points"])
+        if "voyage" in payload:
+            voyage = json.loads(json.dumps(payload["voyage"]))
+            if isinstance(voyage, dict) and isinstance(voyage.get("ports"), list):
+                voyage["ports"] = self._sanitize_batch_points(voyage["ports"])
+            minimal["voyage"] = voyage
+        for key in ("etd", "weatherSource"):
             if key in payload:
-                minimal[key] = payload[key]
+                minimal[key] = json.loads(json.dumps(payload[key]))
+        if "speeds" in payload:
+            minimal["speeds"] = self._sanitize_batch_speed_ranges(payload["speeds"])
         minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
         minimal["optimizationType"] = "Fuel"
         minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
         return minimal
+
+    def _sanitize_batch_points(self, points: Any) -> Any:
+        if not isinstance(points, list):
+            return json.loads(json.dumps(points))
+        sanitized = []
+        allowed_property_keys = ("name", "port", "forceRhumbLine")
+        for point in points:
+            feature = json.loads(json.dumps(point))
+            if isinstance(feature, dict):
+                for key in ("speed", "rpm", "etd", "eta", "time", "timestamp"):
+                    feature.pop(key, None)
+                props = feature.get("properties")
+                if isinstance(props, dict):
+                    feature["properties"] = {key: props[key] for key in allowed_property_keys if key in props and props[key] is not None}
+            sanitized.append(feature)
+        return sanitized
+
+    def _sanitize_batch_speed_ranges(self, speeds: Any) -> Any:
+        if not isinstance(speeds, list):
+            return json.loads(json.dumps(speeds))
+        sanitized = []
+        for item in speeds:
+            if not isinstance(item, dict):
+                sanitized.append(item)
+                continue
+            speed_range = {}
+            for key in ("minimum", "maximum"):
+                value = item.get(key)
+                if isinstance(value, (int, float)):
+                    speed_range[key] = round(float(value), 1)
+            if speed_range:
+                sanitized.append(speed_range)
+        return sanitized
 
     def _resume_batch_output_if_possible(
         self,
