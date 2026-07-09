@@ -311,8 +311,15 @@ OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 1, "maximum": 50}
 BATCH_INSTRUCTED_SPEED = round((OPTIMAL_BATCH_SPEED_RANGE["minimum"] + OPTIMAL_BATCH_SPEED_RANGE["maximum"]) / 2, 1)
 BATCH_SPEED_RANGE_ENDPOINTS = {"Recommended set speed", "Fixed ETA", "Optimal set speed"}
 NO_OPTIMIZATION_TYPE_LABEL = "Not used"
-OPTIMIZATION_TYPE_OPTIONS = ["Fuel", "Time", "Cost"]
-OPTIMIZATION_TYPE_ENDPOINTS = {"Instructed set speed", "Recommended set speed", "Fixed ETA", "Optimal set speed"}
+OPTIMIZATION_TYPE_OPTIONS = ["Fuel", "Time", "Cost", "FuelCost"]
+OPTIMIZATION_OPTIONS_BY_ENDPOINT = {
+    "Instructed set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+    "Recommended set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+    "Fixed ETA": ["Fuel", "Cost", "FuelCost"],
+    "Optimal set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+}
+OPTIMIZATION_TYPE_ENDPOINTS = set(OPTIMIZATION_OPTIONS_BY_ENDPOINT)
+COST_BASED_OPTIMIZATION_TYPES = {"Cost", "FuelCost"}
 DEFAULT_OPTIMIZATION_BY_ENDPOINT = {
     "Instructed set speed": "Fuel",
     "Recommended set speed": "Fuel",
@@ -1002,7 +1009,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Load Async Sample", command=self.load_async_sample).pack(side=tk.LEFT, padx=5)
 
     def _optimization_options_for_endpoint(self, endpoint_name: str) -> List[str]:
-        return OPTIMIZATION_TYPE_OPTIONS if endpoint_name in OPTIMIZATION_TYPE_ENDPOINTS else [NO_OPTIMIZATION_TYPE_LABEL]
+        return OPTIMIZATION_OPTIONS_BY_ENDPOINT.get(endpoint_name, [NO_OPTIMIZATION_TYPE_LABEL])
 
     def _default_optimization_type(self, endpoint_name: str) -> str:
         if endpoint_name not in OPTIMIZATION_TYPE_ENDPOINTS:
@@ -1013,7 +1020,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if endpoint_name not in OPTIMIZATION_TYPE_ENDPOINTS:
             return None
         value = variable.get().strip()
-        if value not in OPTIMIZATION_TYPE_OPTIONS:
+        if value not in self._optimization_options_for_endpoint(endpoint_name):
             value = self._default_optimization_type(endpoint_name)
             variable.set(value)
         return value
@@ -1193,10 +1200,14 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             return
 
         value = optimization_type or DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
-        if value not in OPTIMIZATION_TYPE_OPTIONS:
-            raise ValueError(f"Unsupported optimization type for {endpoint_name}: {value}")
+        allowed_values = self._optimization_options_for_endpoint(endpoint_name)
+        if value not in allowed_values:
+            raise ValueError(
+                f"Unsupported optimization type for {endpoint_name}: {value}. "
+                f"Allowed: {', '.join(allowed_values)}"
+            )
         payload["optimizationType"] = value
-        if value == "Cost":
+        if value in COST_BASED_OPTIMIZATION_TYPES:
             payload.setdefault("costsAndFuelInfo", json.loads(json.dumps(VESSEL_SAMPLE_COSTS_AND_FUEL)))
         else:
             payload.pop("costsAndFuelInfo", None)
@@ -1463,10 +1474,14 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
         minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
         value = optimization_type or payload.get("optimizationType") or DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
-        if value not in OPTIMIZATION_TYPE_OPTIONS:
-            raise ValueError(f"Unsupported optimization type for {endpoint_name}: {value}")
+        allowed_values = self._optimization_options_for_endpoint(endpoint_name)
+        if value not in allowed_values:
+            raise ValueError(
+                f"Unsupported optimization type for {endpoint_name}: {value}. "
+                f"Allowed: {', '.join(allowed_values)}"
+            )
         minimal["optimizationType"] = value
-        if value == "Cost":
+        if value in COST_BASED_OPTIMIZATION_TYPES:
             minimal["costsAndFuelInfo"] = json.loads(json.dumps(payload.get("costsAndFuelInfo") or VESSEL_SAMPLE_COSTS_AND_FUEL))
         minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
         return minimal
