@@ -376,7 +376,7 @@ DEFAULT_CONTINUOUS_PLANNED_RTZ = DEFAULT_CONTINUOUS_BATCH_ROOT / "9935208_SAS_Pl
 DEFAULT_CONTINUOUS_OPTIMAL_DIR = DEFAULT_CONTINUOUS_BATCH_ROOT / "optimal"
 DEFAULT_CONTINUOUS_OUTPUT_DIR = DEFAULT_CONTINUOUS_BATCH_ROOT / "abb_optimal"
 RTZ_FILE_NAME_RE = re.compile(
-    r"^(?P<imo>\d+)_SAS_(?P<kind>Planned|Optimal)_(?P<date>\d{8})_(?P<time>\d{6})\.rtz$",
+    r"^(?P<imo>\d+)_SAS_(?P<kind>.+)_(?P<date>\d{8})_(?P<time>\d{6})\.rtz$",
     re.IGNORECASE,
 )
 
@@ -1984,14 +1984,14 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         self.after(100, self._flush_log_queue)
 
     def _build_ui(self) -> None:
-        controls = ttk.LabelFrame(self, text="Optimal RTZ Folders")
+        controls = ttk.LabelFrame(self, text="Result RTZ Folders")
         controls.pack(fill=tk.X, pady=(0, 8))
-        self.profile_folder_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
+        self.profile_folder_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
         self.profile_limit_var = tk.StringVar(value="0")
         ttk.Label(controls, text="Folders").grid(row=0, column=0, sticky="nw", padx=5, pady=5)
         self.profile_folder_list = tk.Listbox(controls, height=4, exportselection=False)
         self.profile_folder_list.grid(row=0, column=1, rowspan=3, sticky="we", padx=5, pady=5)
-        self.profile_folder_list.insert(tk.END, str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
+        self.profile_folder_list.insert(tk.END, str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
         folder_buttons = ttk.Frame(controls)
         folder_buttons.grid(row=0, column=2, rowspan=3, sticky="n", padx=5, pady=5)
         ttk.Button(folder_buttons, text="Add Folder", command=self.browse_profile_folder).pack(fill=tk.X, pady=(0, 4))
@@ -2020,7 +2020,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     def browse_profile_folder(self) -> None:
-        path = filedialog.askdirectory(title="Select optimal RTZ folder", initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT))
+        path = filedialog.askdirectory(title="Select result RTZ folder", initialdir=str(DEFAULT_CONTINUOUS_BATCH_ROOT))
         if path:
             self._add_profile_folder(path)
 
@@ -2059,11 +2059,11 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         try:
             folders = self._profile_folders()
             if not folders:
-                raise ValueError("Add at least one optimal RTZ folder.")
+                raise ValueError("Add at least one result RTZ folder.")
             limit = self._profile_limit()
             used_labels: set = set()
             profile_series: List[Dict[str, Any]] = []
-            for folder_index, folder in enumerate(folders):
+            for folder in folders:
                 if not folder.exists():
                     raise ValueError(f"Folder not found: {folder}")
                 files = self._optimal_rtz_files(folder)
@@ -2073,59 +2073,74 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
                     self.log(f"Skipping folder with fewer than two RTZ files: {folder}")
                     continue
 
-                records = []
+                records_by_kind: Dict[str, List[Dict[str, Any]]] = {}
                 for path in files:
                     metadata = self._rtz_file_metadata(path)
                     timestamp = metadata.get("timestamp_dt")
                     if timestamp is None:
-                        self.log(f"Skipping file without timestamp pattern: {path.name}")
+                        self.log(f"Skipping file without result timestamp pattern: {path.name}")
                         continue
                     points = self._parse_profile_rtz(path)
                     if not points:
                         self.log(f"Skipping RTZ without waypoints: {path.name}")
                         continue
-                    records.append({"path": path, "time": timestamp, "points": points})
-                records.sort(key=lambda item: item["time"])
-                if len(records) < 2:
-                    self.log(f"Skipping folder without usable timestamped RTZ pairs: {folder}")
+                    kind = str(metadata.get("kind") or "Result")
+                    records_by_kind.setdefault(kind, []).append({"path": path, "time": timestamp, "points": points, "kind": kind})
+
+                usable_groups: List[Tuple[str, List[Dict[str, Any]]]] = []
+                for kind, records in sorted(records_by_kind.items(), key=lambda item: item[0].lower()):
+                    records.sort(key=lambda item: (item["time"], item["path"].name))
+                    if len(records) < 2:
+                        self.log(f"Skipping {kind} in {folder.name}: fewer than two timestamped RTZ files.")
+                        continue
+                    usable_groups.append((kind, records))
+                if not usable_groups:
+                    self.log(f"Skipping folder without usable timestamped result RTZ pairs: {folder}")
                     continue
 
-                label = self._profile_series_label(folder, used_labels)
-                color = PROFILE_SERIES_COLORS[folder_index % len(PROFILE_SERIES_COLORS)]
-                speed_intervals: List[Dict[str, Any]] = []
-                rpm_intervals: List[Dict[str, Any]] = []
-                for index in range(len(records) - 1):
-                    speed_items, rpm_items = self._profile_pair_intervals(records[index], records[index + 1])
-                    for item in speed_items:
-                        item["series"] = label
-                        item["folder"] = str(folder)
-                    for item in rpm_items:
-                        item["series"] = label
-                        item["folder"] = str(folder)
-                    speed_intervals.extend(speed_items)
-                    rpm_intervals.extend(rpm_items)
+                show_kind_in_label = len(usable_groups) > 1
+                for kind, records in usable_groups:
+                    label = self._profile_series_label(folder, used_labels, kind if show_kind_in_label else "")
+                    color = PROFILE_SERIES_COLORS[len(profile_series) % len(PROFILE_SERIES_COLORS)]
+                    speed_intervals: List[Dict[str, Any]] = []
+                    rpm_intervals: List[Dict[str, Any]] = []
+                    for index in range(len(records) - 1):
+                        speed_items, rpm_items = self._profile_pair_intervals(records[index], records[index + 1])
+                        for item in speed_items:
+                            item["series"] = label
+                            item["folder"] = str(folder)
+                            item["kind"] = kind
+                        for item in rpm_items:
+                            item["series"] = label
+                            item["folder"] = str(folder)
+                            item["kind"] = kind
+                        speed_intervals.extend(speed_items)
+                        rpm_intervals.extend(rpm_items)
 
-                profile_series.append(
-                    {
-                        "label": label,
-                        "folder": str(folder),
-                        "color": color,
-                        "records": records,
-                        "speed_intervals": speed_intervals,
-                        "rpm_intervals": rpm_intervals,
-                    }
-                )
+                    profile_series.append(
+                        {
+                            "label": label,
+                            "folder": str(folder),
+                            "kind": kind,
+                            "color": color,
+                            "records": records,
+                            "speed_intervals": speed_intervals,
+                            "rpm_intervals": rpm_intervals,
+                        }
+                    )
 
             if not profile_series:
-                raise ValueError("No usable optimal RTZ folders found.")
+                raise ValueError("No usable result RTZ folders found.")
 
             self.after(0, lambda: self._apply_profiles(profile_series))
         except Exception as exc:
             self.log(f"ERROR: {exc}")
-            self.after(0, lambda: messagebox.showerror("Optimal Profile Error", str(exc)))
+            self.after(0, lambda: messagebox.showerror("Result Preview Error", str(exc)))
 
-    def _profile_series_label(self, folder: Path, used_labels: set) -> str:
+    def _profile_series_label(self, folder: Path, used_labels: set, kind: str = "") -> str:
         base = folder.name or str(folder)
+        if kind:
+            base = f"{base} / {kind}"
         label = base
         if label in used_labels:
             parent_label = f"{folder.parent.name}\\{base}" if folder.parent.name else base
@@ -2155,7 +2170,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         )
         total_records = sum(len(series["records"]) for series in profile_series)
         self.log(
-            f"Generated profiles from {len(profile_series)} folders and {total_records} RTZ files: "
+            f"Generated profiles from {len(profile_series)} result series and {total_records} RTZ files: "
             f"{len(self.speed_intervals)} speed intervals, {len(self.rpm_intervals)} rpm intervals."
         )
         for series in profile_series:
@@ -2172,7 +2187,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
 
     def save_profiles_csv(self) -> None:
         if not self.speed_intervals and not self.rpm_intervals:
-            messagebox.showinfo("Optimal Profiles", "Generate profiles before saving CSV.")
+            messagebox.showinfo("Result Preview", "Generate profiles before saving CSV.")
             return
         path = filedialog.asksaveasfilename(
             title="Save Profile CSV",
@@ -2183,7 +2198,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
             return
         with open(path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["profile", "series", "folder", "start_utc", "end_utc", "value", "source_file", "leg_index", "distance_nm"])
+            writer.writerow(["profile", "series", "kind", "folder", "start_utc", "end_utc", "value", "source_file", "leg_index", "distance_nm"])
             for series in self.profile_series:
                 for profile_name, intervals in (("speed", series["speed_intervals"]), ("rpm", series["rpm_intervals"])):
                     for item in intervals:
@@ -2191,6 +2206,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
                             [
                                 profile_name,
                                 item.get("series", series.get("label", "")),
+                                item.get("kind", series.get("kind", "")),
                                 item.get("folder", series.get("folder", "")),
                                 _utc_z(item["start"]),
                                 _utc_z(item["end"]),
@@ -2217,7 +2233,12 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         if not match:
             return {"timestamp_sort": path.name, "timestamp_dt": None}
         dt = datetime.strptime(match.group("date") + match.group("time"), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-        return {"timestamp_sort": dt, "timestamp_dt": dt, "timestamp_label": f"{match.group('date')}_{match.group('time')}"}
+        return {
+            "kind": match.group("kind"),
+            "timestamp_sort": dt,
+            "timestamp_dt": dt,
+            "timestamp_label": f"{match.group('date')}_{match.group('time')}",
+        }
 
     def _parse_profile_rtz(self, path: Path) -> List[Dict[str, Any]]:
         root = ET.parse(path).getroot()
@@ -3755,7 +3776,7 @@ class AbbApiGui(tk.Tk):
         self.tabs.add(self.product_tab, text="Product API")
         self.tabs.add(self.notification_tab, text="Notification API")
         self.tabs.add(self.map_tab, text="Map Preview")
-        self.tabs.add(self.profile_tab, text="Optimal Profiles")
+        self.tabs.add(self.profile_tab, text="Result Preview")
         self.tabs.bind("<<NotebookTabChanged>>", self._remember_active_api_tab)
 
     def _remember_active_api_tab(self, _event: tk.Event) -> None:
