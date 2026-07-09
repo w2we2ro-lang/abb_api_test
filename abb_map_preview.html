@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ABB API Map Preview</title>
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    #panel { position: absolute; top: 12px; left: 12px; max-width: 360px; max-height: 45vh; overflow: auto; background: white; padding: 12px; box-shadow: 0 2px 12px #777; font-family: Arial, sans-serif; z-index: 10; }
+    .notice { color: #8a4b00; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <strong>ABB API Map Preview</strong>
+    
+    <div>Points: 6 / Lines: 0</div>
+    <ul><li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=29.7262421,-95.2641144'>Houston, TX (29.726242, -95.264114)</a></li>
+<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=29.7262421,-95.2641144'>geometry (29.726242, -95.264114)</a></li>
+<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=29.7262421,-95.2641144'>coordinates (29.726242, -95.264114)</a></li>
+<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=51.9672394,4.0710449'>Rotterdam (NLRTM) (51.967239, 4.071045)</a></li>
+<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=51.9672394,4.0710449'>geometry (51.967239, 4.071045)</a></li>
+<li><a target='_blank' href='https://www.google.com/maps/search/?api=1&query=51.9672394,4.0710449'>coordinates (51.967239, 4.071045)</a></li></ul>
+  </div>
+  <div id="map"></div>
+  <script>
+    const data = {"points": [{"lat": 29.7262421, "lng": -95.2641144, "label": "Houston, TX"}, {"lat": 29.7262421, "lng": -95.2641144, "label": "geometry"}, {"lat": 29.7262421, "lng": -95.2641144, "label": "coordinates"}, {"lat": 51.9672394, "lng": 4.0710449, "label": "Rotterdam (NLRTM)"}, {"lat": 51.9672394, "lng": 4.0710449, "label": "geometry"}, {"lat": 51.9672394, "lng": 4.0710449, "label": "coordinates"}], "lines": []};
+    function initMap() {
+      const map = new google.maps.Map(document.getElementById("map"), {
+        zoom: 4,
+        center: {lat: 29.7262421, lng: -95.2641144},
+        mapTypeId: "terrain"
+      });
+      const bounds = new google.maps.LatLngBounds();
+      data.points.forEach((point, index) => {
+        const pos = {lat: point.lat, lng: point.lng};
+        new google.maps.Marker({position: pos, map, label: String((index % 9) + 1), title: point.label || "Point"});
+        bounds.extend(pos);
+      });
+      data.lines.forEach((line) => {
+        const path = line.map((point) => ({lat: point.lat, lng: point.lng}));
+        new google.maps.Polyline({path, map, geodesic: true, strokeColor: "#0b57d0", strokeOpacity: 0.9, strokeWeight: 3});
+        path.forEach((pos) => bounds.extend(pos));
+      });
+      if (!bounds.isEmpty()) map.fitBounds(bounds);
+    }
+  </script>
+  <script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBm8XgwXqIc5JGqNDa2iiQwdQmz6lUjoAo&callback=initMap"></script>
+</body>
+</html>

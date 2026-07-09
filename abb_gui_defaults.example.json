@@ -1,6 +1,0 @@
-{
-  "token_url": "https://identity.genix.abilityplatform.abb/public/api/oauth2/token",
-  "client_id": "your-client-id",
-  "client_secret": "your-client-secret",
-  "scope": "https://genb2cep01euwprod.onmicrosoft.com/rs.iam/region"
-}
