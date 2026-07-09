@@ -227,6 +227,50 @@ VESSEL_SAMPLE_VOYAGE = {
     ],
 }
 
+RPM_SPEED_SLIP_TABLE = [
+    {"rpm": 52, "speed": 16.28, "slip5": 15.46, "slip10": 14.65, "slip15": 13.83},
+    {"rpm": 53, "speed": 16.59, "slip5": 15.76, "slip10": 14.93, "slip15": 14.10},
+    {"rpm": 54, "speed": 16.90, "slip5": 16.06, "slip10": 15.21, "slip15": 14.37},
+    {"rpm": 55, "speed": 17.22, "slip5": 16.35, "slip10": 15.49, "slip15": 14.63},
+    {"rpm": 56, "speed": 17.53, "slip5": 16.65, "slip10": 15.78, "slip15": 14.90},
+    {"rpm": 57, "speed": 17.84, "slip5": 16.95, "slip10": 16.06, "slip15": 15.16},
+    {"rpm": 58, "speed": 18.15, "slip5": 17.25, "slip10": 16.34, "slip15": 15.43},
+    {"rpm": 59, "speed": 18.47, "slip5": 17.54, "slip10": 16.62, "slip15": 15.70},
+    {"rpm": 60, "speed": 18.78, "slip5": 17.84, "slip10": 16.90, "slip15": 15.96},
+    {"rpm": 61, "speed": 19.09, "slip5": 18.14, "slip10": 17.18, "slip15": 16.23},
+    {"rpm": 62, "speed": 19.41, "slip5": 18.44, "slip10": 17.47, "slip15": 16.50},
+    {"rpm": 63, "speed": 19.72, "slip5": 18.73, "slip10": 17.75, "slip15": 16.76},
+    {"rpm": 64, "speed": 20.03, "slip5": 19.03, "slip10": 18.03, "slip15": 17.03},
+    {"rpm": 65, "speed": 20.35, "slip5": 19.33, "slip10": 18.31, "slip15": 17.29},
+    {"rpm": 66, "speed": 20.66, "slip5": 19.63, "slip10": 18.59, "slip15": 17.56},
+    {"rpm": 67, "speed": 20.97, "slip5": 19.92, "slip10": 18.87, "slip15": 17.83},
+    {"rpm": 68, "speed": 21.28, "slip5": 20.22, "slip10": 19.16, "slip15": 18.09},
+    {"rpm": 69, "speed": 21.60, "slip5": 20.52, "slip10": 19.44, "slip15": 18.36},
+    {"rpm": 70, "speed": 21.91, "slip5": 20.81, "slip10": 19.72, "slip15": 18.62},
+    {"rpm": 71, "speed": 22.22, "slip5": 21.11, "slip10": 20.00, "slip15": 18.89},
+    {"rpm": 72, "speed": 22.54, "slip5": 21.41, "slip10": 20.28, "slip15": 19.16},
+    {"rpm": 73, "speed": 22.85, "slip5": 21.71, "slip10": 20.56, "slip15": 19.42},
+    {"rpm": 74, "speed": 23.16, "slip5": 22.00, "slip10": 20.85, "slip15": 19.69},
+    {"rpm": 75, "speed": 23.48, "slip5": 22.30, "slip10": 21.13, "slip15": 19.95},
+    {"rpm": 76, "speed": 23.79, "slip5": 22.60, "slip10": 21.41, "slip15": 20.22},
+    {"rpm": 77, "speed": 24.10, "slip5": 22.90, "slip10": 21.69, "slip15": 20.49},
+]
+RPM_CURVE_SLIP_COLUMNS = {
+    "0%": "speed",
+    "5%": "slip5",
+    "10%": "slip10",
+    "15%": "slip15",
+}
+DEFAULT_RPM_CURVE_SLIP = "10%"
+
+
+def _rpm_curve_from_slip_table(slip: str = DEFAULT_RPM_CURVE_SLIP) -> Dict[str, List[Dict[str, float]]]:
+    column = RPM_CURVE_SLIP_COLUMNS[slip]
+    return {"values": [{"speed": row[column], "rpm": row["rpm"]} for row in RPM_SPEED_SLIP_TABLE]}
+
+
+VESSEL_SLIP_RPM_CURVE = _rpm_curve_from_slip_table()
+
 VESSEL_SAMPLE_PARAMETERS = {
     "vesselName": "Sample Vessel",
     "imo": "8814275",
@@ -257,10 +301,7 @@ VESSEL_SAMPLE_PARAMETERS = {
         ],
     },
     "rpmCurve": {
-        "values": [
-            {"speed": 0, "rpm": 0},
-            {"speed": 10, "rpm": 1000},
-        ],
+        "values": VESSEL_SLIP_RPM_CURVE["values"],
     },
     "powerCurve": {
         "values": [
@@ -300,6 +341,9 @@ OPTIMAL_BATCH_VESSEL_PARAMETERS = {
         "beam": 51,
         "lengthOverall": 366,
     },
+    "rpmCurve": {
+        "values": VESSEL_SLIP_RPM_CURVE["values"],
+    },
 }
 
 OPTIMAL_BATCH_CONFIG = {
@@ -307,7 +351,7 @@ OPTIMAL_BATCH_CONFIG = {
     "minimumHoursBetweenSpeedChanges": 6,
 }
 
-OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 1, "maximum": 50}
+OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 10, "maximum": 25}
 BATCH_INSTRUCTED_SPEED = round((OPTIMAL_BATCH_SPEED_RANGE["minimum"] + OPTIMAL_BATCH_SPEED_RANGE["maximum"]) / 2, 1)
 BATCH_SPEED_RANGE_ENDPOINTS = {"Recommended set speed", "Fixed ETA", "Optimal set speed"}
 NO_OPTIMIZATION_TYPE_LABEL = "Not used"
