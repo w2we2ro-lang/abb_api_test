@@ -1481,9 +1481,13 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         if len(route_points) < 2:
             self.log(f"No route geometry found. Response saved: {output_path.with_suffix('.response.json')}")
             return False
+        response_rpm_count = self._count_route_rpm(route_points)
         if rpm_sog_profile:
-            rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
-            self.log(f"Applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
+            calculated_rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
+            self.log(
+                f"RPM for RTZ: {response_rpm_count} from response, "
+                f"{calculated_rpm_count} calculated from SOG profile."
+            )
         self._write_rtz(output_path, route_points, route_name=output_path.stem)
         self.log(f"Saved RTZ: {output_path} ({len(route_points)} waypoints)")
         return True
@@ -1599,9 +1603,13 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             self.log(f"Resume: existing JSON has no route geometry. Request will be retried: {source_name}")
             return False
 
+        response_rpm_count = self._count_route_rpm(route_points)
         if rpm_sog_profile:
-            rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
-            self.log(f"Resume: applied RPM from SOG profile: {rpm_count}/{len(route_points)} route waypoints.")
+            calculated_rpm_count = self._apply_rpm_sog_profile(route_points, rpm_sog_profile)
+            self.log(
+                f"Resume: RPM for RTZ: {response_rpm_count} from response, "
+                f"{calculated_rpm_count} calculated from SOG profile."
+            )
         self._write_rtz(output_path, route_points, route_name=output_path.stem)
         self.log(f"Resume: rebuilt RTZ from existing JSON: {output_path} ({len(route_points)} waypoints)")
         return True
@@ -1643,6 +1651,14 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             "rpm_max": max(rpms),
         }
 
+    def _count_route_rpm(self, route_points: List[Dict[str, Any]]) -> int:
+        count = 0
+        for point in route_points:
+            props = point.get("properties") if isinstance(point.get("properties"), dict) else {}
+            if isinstance(props.get("rpm"), (int, float)):
+                count += 1
+        return count
+
     def _apply_rpm_sog_profile(self, route_points: List[Dict[str, Any]], profile: Dict[str, Any]) -> int:
         applied = 0
         for point in route_points:
@@ -1650,7 +1666,6 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             if not isinstance(props, dict):
                 continue
             if isinstance(props.get("rpm"), (int, float)):
-                applied += 1
                 continue
             speed = props.get("speed")
             if not isinstance(speed, (int, float)):
@@ -1864,8 +1879,19 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 for item in obj:
                     visit(item)
 
+        def route_candidate_score(points: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+            rpm_count = 0
+            speed_count = 0
+            for point in points:
+                props = point.get("properties") if isinstance(point.get("properties"), dict) else {}
+                if isinstance(props.get("rpm"), (int, float)):
+                    rpm_count += 1
+                if isinstance(props.get("speed"), (int, float)):
+                    speed_count += 1
+            return rpm_count, speed_count, len(points)
+
         visit(data)
-        return max(candidates, key=len) if candidates else []
+        return max(candidates, key=route_candidate_score) if candidates else []
 
     def _write_rtz(self, output_path: Path, route_points: List[Dict[str, Any]], route_name: str) -> None:
         namespace = "http://www.cirm.org/RTZ/1/0"
