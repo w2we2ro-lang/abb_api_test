@@ -310,6 +310,22 @@ OPTIMAL_BATCH_CONFIG = {
 OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 1, "maximum": 50}
 BATCH_INSTRUCTED_SPEED = round((OPTIMAL_BATCH_SPEED_RANGE["minimum"] + OPTIMAL_BATCH_SPEED_RANGE["maximum"]) / 2, 1)
 BATCH_SPEED_RANGE_ENDPOINTS = {"Recommended set speed", "Fixed ETA", "Optimal set speed"}
+NO_OPTIMIZATION_TYPE_LABEL = "Not used"
+OPTIMIZATION_TYPE_OPTIONS = ["Fuel", "Time", "Cost", "FuelCost"]
+OPTIMIZATION_OPTIONS_BY_ENDPOINT = {
+    "Instructed set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+    "Recommended set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+    "Fixed ETA": ["Fuel", "Cost", "FuelCost"],
+    "Optimal set speed": ["Fuel", "Time", "Cost", "FuelCost"],
+}
+OPTIMIZATION_TYPE_ENDPOINTS = set(OPTIMIZATION_OPTIONS_BY_ENDPOINT)
+COST_BASED_OPTIMIZATION_TYPES = {"Cost", "FuelCost"}
+DEFAULT_OPTIMIZATION_BY_ENDPOINT = {
+    "Instructed set speed": "Fuel",
+    "Recommended set speed": "Fuel",
+    "Fixed ETA": "Fuel",
+    "Optimal set speed": "Fuel",
+}
 BATCH_OUTPUT_KINDS = {
     "Shortest path": "ShortestPath",
     "Instructed set speed": "InstructedSpeed",
@@ -905,16 +921,28 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         rtz_frame.pack(fill=tk.X, pady=(0, 8))
         self.rtz_path_var = tk.StringVar()
         self.rtz_request_type_var = tk.StringVar(value="Shortest Path Request")
+        self.rtz_optimization_type_var = tk.StringVar(value=NO_OPTIMIZATION_TYPE_LABEL)
         ttk.Entry(rtz_frame, textvariable=self.rtz_path_var).grid(row=0, column=0, sticky="we", padx=5, pady=5)
         ttk.Button(rtz_frame, text="Browse RTZ", command=self.browse_rtz_file).grid(row=0, column=1, padx=5, pady=5)
-        ttk.Combobox(
+        rtz_request_box = ttk.Combobox(
             rtz_frame,
             textvariable=self.rtz_request_type_var,
             values=list(RTZ_REQUEST_TYPES.keys()),
             state="readonly",
             width=28,
-        ).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        )
+        rtz_request_box.grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        rtz_request_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_rtz_optimization_options())
         ttk.Button(rtz_frame, text="Convert RTZ", command=self.convert_rtz_to_request).grid(row=1, column=1, padx=5, pady=5)
+        ttk.Label(rtz_frame, text="Optimization").grid(row=2, column=0, sticky="w", padx=5, pady=(0, 5))
+        self.rtz_optimization_box = ttk.Combobox(
+            rtz_frame,
+            textvariable=self.rtz_optimization_type_var,
+            values=[NO_OPTIMIZATION_TYPE_LABEL],
+            state="readonly",
+            width=18,
+        )
+        self.rtz_optimization_box.grid(row=2, column=1, sticky="w", padx=5, pady=(0, 5))
         rtz_frame.columnconfigure(0, weight=1)
 
         batch_frame = ttk.LabelFrame(left, text="Continuous RTZ Batch")
@@ -923,6 +951,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         self.batch_optimal_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OPTIMAL_DIR))
         self.batch_output_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
         self.batch_endpoint_var = tk.StringVar(value="Optimal set speed")
+        self.batch_optimization_type_var = tk.StringVar(value="Fuel")
         self.batch_limit_var = tk.StringVar(value="0")
         ttk.Label(batch_frame, text="Planned RTZ").grid(row=0, column=0, sticky="w", padx=5, pady=3)
         ttk.Entry(batch_frame, textvariable=self.batch_planned_path_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
@@ -934,18 +963,31 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Entry(batch_frame, textvariable=self.batch_output_dir_var).grid(row=2, column=1, sticky="we", padx=5, pady=3)
         ttk.Button(batch_frame, text="Browse", command=self.browse_batch_output_dir).grid(row=2, column=2, padx=5, pady=3)
         ttk.Label(batch_frame, text="Batch request").grid(row=3, column=0, sticky="w", padx=5, pady=3)
-        ttk.Combobox(
+        batch_request_box = ttk.Combobox(
             batch_frame,
             textvariable=self.batch_endpoint_var,
             values=list(VESSEL_ASYNC_ENDPOINTS.keys()),
             state="readonly",
             width=28,
-        ).grid(row=3, column=1, sticky="w", padx=5, pady=3)
-        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=4, column=0, sticky="w", padx=5, pady=3)
-        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=4, column=1, sticky="w", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Start Batch", command=self.start_continuous_optimal_batch).grid(row=4, column=1, sticky="e", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=4, column=2, padx=5, pady=3)
+        )
+        batch_request_box.grid(row=3, column=1, sticky="w", padx=5, pady=3)
+        batch_request_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_batch_optimization_options())
+        ttk.Label(batch_frame, text="Optimization").grid(row=4, column=0, sticky="w", padx=5, pady=3)
+        self.batch_optimization_box = ttk.Combobox(
+            batch_frame,
+            textvariable=self.batch_optimization_type_var,
+            values=OPTIMIZATION_TYPE_OPTIONS,
+            state="readonly",
+            width=18,
+        )
+        self.batch_optimization_box.grid(row=4, column=1, sticky="w", padx=5, pady=3)
+        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=5, column=0, sticky="w", padx=5, pady=3)
+        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=5, column=1, sticky="w", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Start Batch", command=self.start_continuous_optimal_batch).grid(row=5, column=1, sticky="e", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=5, column=2, padx=5, pady=3)
         batch_frame.columnconfigure(1, weight=1)
+        self._sync_rtz_optimization_options()
+        self._sync_batch_optimization_options()
 
         req_frame = ttk.LabelFrame(left, text="Route Request JSON")
         req_frame.pack(fill=tk.BOTH, expand=True)
@@ -965,6 +1007,37 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Load JSON", command=self.load_json_preset).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom, text="Save JSON", command=self.save_json_preset).pack(side=tk.LEFT, padx=5)
         ttk.Button(bottom, text="Load Async Sample", command=self.load_async_sample).pack(side=tk.LEFT, padx=5)
+
+    def _optimization_options_for_endpoint(self, endpoint_name: str) -> List[str]:
+        return OPTIMIZATION_OPTIONS_BY_ENDPOINT.get(endpoint_name, [NO_OPTIMIZATION_TYPE_LABEL])
+
+    def _default_optimization_type(self, endpoint_name: str) -> str:
+        if endpoint_name not in OPTIMIZATION_TYPE_ENDPOINTS:
+            return NO_OPTIMIZATION_TYPE_LABEL
+        return DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
+
+    def _selected_optimization_type(self, endpoint_name: str, variable: tk.StringVar) -> Optional[str]:
+        if endpoint_name not in OPTIMIZATION_TYPE_ENDPOINTS:
+            return None
+        value = variable.get().strip()
+        if value not in self._optimization_options_for_endpoint(endpoint_name):
+            value = self._default_optimization_type(endpoint_name)
+            variable.set(value)
+        return value
+
+    def _sync_optimization_box(self, combo: ttk.Combobox, variable: tk.StringVar, endpoint_name: str) -> None:
+        values = self._optimization_options_for_endpoint(endpoint_name)
+        combo.configure(values=values)
+        if variable.get() not in values:
+            variable.set(self._default_optimization_type(endpoint_name))
+
+    def _sync_rtz_optimization_options(self) -> None:
+        endpoint_name = RTZ_REQUEST_TYPES.get(self.rtz_request_type_var.get(), "Shortest path")
+        self._sync_optimization_box(self.rtz_optimization_box, self.rtz_optimization_type_var, endpoint_name)
+
+    def _sync_batch_optimization_options(self) -> None:
+        endpoint_name = self.batch_endpoint_var.get().strip()
+        self._sync_optimization_box(self.batch_optimization_box, self.batch_optimization_type_var, endpoint_name)
 
     def load_async_sample(self) -> None:
         sample = _build_vessel_async_sample(self.async_endpoint_var.get())
@@ -1008,11 +1081,13 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 raise ValueError("RTZ route must contain at least two waypoints.")
             request_type = self.rtz_request_type_var.get()
             endpoint_name = RTZ_REQUEST_TYPES[request_type]
-            payload = self._build_rtz_request(endpoint_name, points, schedule)
+            optimization_type = self._selected_optimization_type(endpoint_name, self.rtz_optimization_type_var)
+            payload = self._build_rtz_request(endpoint_name, points, schedule, optimization_type)
             self.async_endpoint_var.set(endpoint_name)
             self.request_text.delete("1.0", tk.END)
             self.request_text.insert("1.0", json.dumps(payload, indent=2))
-            self.log(f"RTZ converted: {len(points)} waypoints -> {request_type}")
+            suffix = f", optimization={optimization_type}" if optimization_type else ""
+            self.log(f"RTZ converted: {len(points)} waypoints -> {request_type}{suffix}")
         except Exception as exc:
             self.log(f"ERROR: {exc}")
             messagebox.showerror("RTZ Conversion Error", str(exc))
@@ -1091,6 +1166,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         endpoint_name: str,
         points: List[Dict[str, Any]],
         schedule: Dict[str, Any],
+        optimization_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = _build_vessel_async_sample(endpoint_name)
         payload["id"] = f"rtz-{endpoint_name.lower().replace(' ', '-')}"
@@ -1108,7 +1184,34 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         elif endpoint_name == "Fixed ETA":
             payload["etd"], payload["eta"] = _realistic_etd_eta(schedule.get("etd"), schedule.get("eta"))
             payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
+        self._apply_optimization_type(payload, endpoint_name, optimization_type)
         return payload
+
+    def _apply_optimization_type(
+        self,
+        payload: Dict[str, Any],
+        endpoint_name: str,
+        optimization_type: Optional[str],
+    ) -> None:
+        if endpoint_name not in OPTIMIZATION_TYPE_ENDPOINTS:
+            payload.pop("optimizationType", None)
+            payload.pop("costsAndFuelInfo", None)
+            payload.pop("costs", None)
+            return
+
+        value = optimization_type or DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
+        allowed_values = self._optimization_options_for_endpoint(endpoint_name)
+        if value not in allowed_values:
+            raise ValueError(
+                f"Unsupported optimization type for {endpoint_name}: {value}. "
+                f"Allowed: {', '.join(allowed_values)}"
+            )
+        payload["optimizationType"] = value
+        if value in COST_BASED_OPTIMIZATION_TYPES:
+            payload.setdefault("costsAndFuelInfo", json.loads(json.dumps(VESSEL_SAMPLE_COSTS_AND_FUEL)))
+        else:
+            payload.pop("costsAndFuelInfo", None)
+            payload.pop("costs", None)
 
     def start_continuous_optimal_batch(self) -> None:
         if self.batch_running:
@@ -1127,6 +1230,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             endpoint_name = self.batch_endpoint_var.get().strip()
             if endpoint_name not in VESSEL_ASYNC_ENDPOINTS:
                 raise ValueError(f"Unsupported batch request type: {endpoint_name}")
+            optimization_type = self._selected_optimization_type(endpoint_name, self.batch_optimization_type_var)
             planned_path = Path(self.batch_planned_path_var.get().strip())
             optimal_dir = Path(self.batch_optimal_dir_var.get().strip())
             output_dir = Path(self.batch_output_dir_var.get().strip())
@@ -1177,6 +1281,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 f"Continuous RTZ batch prepared: {len(entries)} {endpoint_name} requests "
                 f"for {len(optimal_files)} reference optimal files."
             )
+            if optimization_type:
+                self.log(f"Batch optimization type: {optimization_type}")
             for index, entry in enumerate(entries, start=1):
                 if self.batch_stop_event.is_set():
                     self.log("Continuous RTZ batch stopped.")
@@ -1192,7 +1298,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 if self._resume_batch_output_if_possible(output_path, websocket_path, response_path, rpm_sog_profile):
                     continue
 
-                payload = self._build_rtz_request(endpoint_name, entry["points"], entry["schedule"])
+                payload = self._build_rtz_request(endpoint_name, entry["points"], entry["schedule"], optimization_type)
                 payload["id"] = f"abb-{self._batch_endpoint_slug(endpoint_name)}-{metadata.get('timestamp_label') or index}"
                 if metadata.get("timestamp_iso"):
                     payload["etd"] = metadata["timestamp_iso"]
@@ -1202,7 +1308,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                             payload["eta"] = _utc_z(etd + timedelta(days=FIXED_ETA_DURATION_DAYS))
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
-                payload = self._minimal_batch_payload(payload, endpoint_name)
+                payload = self._minimal_batch_payload(payload, endpoint_name, optimization_type)
 
                 self._write_batch_json(request_path, payload)
                 self._run_optimal_batch_request_with_retries(
@@ -1337,7 +1443,12 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         text = str(exc)
         return "10054" in text or "connection reset" in text.lower()
 
-    def _minimal_batch_payload(self, payload: Dict[str, Any], endpoint_name: str) -> Dict[str, Any]:
+    def _minimal_batch_payload(
+        self,
+        payload: Dict[str, Any],
+        endpoint_name: str,
+        optimization_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         minimal: Dict[str, Any] = {}
         if endpoint_name == "Shortest path" and "type" in payload:
             minimal["type"] = json.loads(json.dumps(payload["type"]))
@@ -1362,7 +1473,16 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         elif endpoint_name in BATCH_SPEED_RANGE_ENDPOINTS:
             minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
         minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
-        minimal["optimizationType"] = "Fuel"
+        value = optimization_type or payload.get("optimizationType") or DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
+        allowed_values = self._optimization_options_for_endpoint(endpoint_name)
+        if value not in allowed_values:
+            raise ValueError(
+                f"Unsupported optimization type for {endpoint_name}: {value}. "
+                f"Allowed: {', '.join(allowed_values)}"
+            )
+        minimal["optimizationType"] = value
+        if value in COST_BASED_OPTIMIZATION_TYPES:
+            minimal["costsAndFuelInfo"] = json.loads(json.dumps(payload.get("costsAndFuelInfo") or VESSEL_SAMPLE_COSTS_AND_FUEL))
         minimal["config"] = dict(OPTIMAL_BATCH_CONFIG)
         return minimal
 
