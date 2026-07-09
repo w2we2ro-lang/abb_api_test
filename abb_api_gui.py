@@ -303,7 +303,7 @@ OPTIMAL_BATCH_CONFIG = {
     "minimumHoursBetweenSpeedChanges": 6,
 }
 
-OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 0, "maximum": 50}
+OPTIMAL_BATCH_SPEED_RANGE = {"minimum": 1, "maximum": 50}
 BATCH_INSTRUCTED_SPEED = round((OPTIMAL_BATCH_SPEED_RANGE["minimum"] + OPTIMAL_BATCH_SPEED_RANGE["maximum"]) / 2, 1)
 BATCH_SPEED_RANGE_ENDPOINTS = {"Recommended set speed", "Fixed ETA", "Optimal set speed"}
 BATCH_OUTPUT_KINDS = {
