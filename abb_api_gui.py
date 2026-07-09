@@ -60,6 +60,7 @@ FIXED_ETA_DURATION_DAYS = 14
 VESSEL_WS_RESPONSE_TIMEOUT_SECONDS = 300
 OPTIMAL_BATCH_RETRY_ATTEMPTS = 3
 OPTIMAL_BATCH_RETRY_DELAY_SECONDS = 15
+AUTO_PROFILE_REFRESH_MS = 30_000
 PROFILE_SERIES_COLORS = [
     "#38bdf8",
     "#f59e0b",
@@ -2178,9 +2179,12 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         self.speed_intervals: List[Dict[str, Any]] = []
         self.rpm_intervals: List[Dict[str, Any]] = []
         self.profile_series: List[Dict[str, Any]] = []
+        self.profile_worker_running = False
+        self.auto_profile_refresh_active = False
         self._init_log_queue()
         self._build_ui()
         self.after(100, self._flush_log_queue)
+        self.after(AUTO_PROFILE_REFRESH_MS, self._auto_generate_profiles_while_batch_running)
 
     def _build_ui(self) -> None:
         controls = ttk.LabelFrame(self, text="Result RTZ Folders")
@@ -2251,10 +2255,46 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
             folders.append(folder)
         return folders
 
-    def generate_profiles(self) -> None:
-        threading.Thread(target=self._generate_profiles_worker, daemon=True).start()
+    def generate_profiles(self, auto: bool = False) -> None:
+        if self.profile_worker_running:
+            if not auto:
+                self.log("Profile generation is already running.")
+            return
+        self.profile_worker_running = True
+        threading.Thread(target=lambda: self._generate_profiles_worker(auto=auto), daemon=True).start()
 
-    def _generate_profiles_worker(self) -> None:
+    def _auto_generate_profiles_while_batch_running(self) -> None:
+        try:
+            root = self.winfo_toplevel()
+            vessel_tab = getattr(root, "vessel_tab", None)
+            batch_running = bool(getattr(vessel_tab, "batch_running", False))
+            if batch_running:
+                if not self.auto_profile_refresh_active:
+                    self.auto_profile_refresh_active = True
+                    seconds = max(1, AUTO_PROFILE_REFRESH_MS // 1000)
+                    self.log(f"Auto profile refresh active while batch is running ({seconds}s interval).")
+                output_var = getattr(vessel_tab, "batch_output_dir_var", None)
+                output_dir = output_var.get().strip() if output_var is not None else ""
+                if output_dir:
+                    self._add_profile_folder(output_dir)
+                if self._has_profile_input_files():
+                    self.generate_profiles(auto=True)
+            elif self.auto_profile_refresh_active:
+                self.auto_profile_refresh_active = False
+                self.log("Auto profile refresh stopped because batch is not running.")
+        finally:
+            self.after(AUTO_PROFILE_REFRESH_MS, self._auto_generate_profiles_while_batch_running)
+
+    def _has_profile_input_files(self) -> bool:
+        for folder in self._profile_folders():
+            try:
+                if folder.exists() and len(list(folder.glob("*.rtz"))) >= 2:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _generate_profiles_worker(self, auto: bool = False) -> None:
         try:
             folders = self._profile_folders()
             if not folders:
@@ -2334,7 +2374,10 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
             self.after(0, lambda: self._apply_profiles(profile_series))
         except Exception as exc:
             self.log(f"ERROR: {exc}")
-            self.after(0, lambda: messagebox.showerror("Result Preview Error", str(exc)))
+            if not auto:
+                self.after(0, lambda: messagebox.showerror("Result Preview Error", str(exc)))
+        finally:
+            self.profile_worker_running = False
 
     def _profile_series_label(self, folder: Path, used_labels: set, kind: str = "") -> str:
         base = folder.name or str(folder)
