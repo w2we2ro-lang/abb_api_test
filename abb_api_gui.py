@@ -76,6 +76,10 @@ def _utc_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _speed_1dp(value: float) -> float:
+    return round(float(value), 1)
+
+
 def _parse_utc(value: Any) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -261,12 +265,12 @@ RPM_CURVE_SLIP_COLUMNS = {
     "10%": "slip10",
     "15%": "slip15",
 }
-DEFAULT_RPM_CURVE_SLIP = "0%"
+DEFAULT_RPM_CURVE_SLIP = "10%"
 
 
 def _rpm_curve_from_slip_table(slip: str = DEFAULT_RPM_CURVE_SLIP) -> Dict[str, List[Dict[str, float]]]:
     column = RPM_CURVE_SLIP_COLUMNS[slip]
-    return {"values": [{"speed": row[column], "rpm": row["rpm"]} for row in RPM_SPEED_SLIP_TABLE]}
+    return {"values": [{"speed": _speed_1dp(row[column]), "rpm": row["rpm"]} for row in RPM_SPEED_SLIP_TABLE]}
 
 
 VESSEL_SLIP_RPM_CURVE = _rpm_curve_from_slip_table()
@@ -1220,14 +1224,14 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             payload["etd"] = _future_etd(schedule["etd"])
 
         speeds = schedule.get("speeds") or []
-        average_speed = round(sum(speeds) / len(speeds), 2) if speeds else 10
+        average_speed = _speed_1dp(sum(speeds) / len(speeds)) if speeds else 10
         if endpoint_name == "Instructed set speed":
             payload["speed"] = average_speed
         elif endpoint_name in {"Recommended set speed", "Optimal set speed"}:
-            payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
+            payload["speeds"] = [{"minimum": max(1, _speed_1dp(average_speed - 2)), "maximum": _speed_1dp(average_speed + 2)}]
         elif endpoint_name == "Fixed ETA":
             payload["etd"], payload["eta"] = _realistic_etd_eta(schedule.get("etd"), schedule.get("eta"))
-            payload["speeds"] = [{"minimum": max(1, round(average_speed - 2, 2)), "maximum": round(average_speed + 2, 2)}]
+            payload["speeds"] = [{"minimum": max(1, _speed_1dp(average_speed - 2)), "maximum": _speed_1dp(average_speed + 2)}]
         self._apply_optimization_type(payload, endpoint_name, optimization_type)
         return payload
 
