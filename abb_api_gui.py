@@ -266,7 +266,7 @@ RPM_CURVE_SLIP_COLUMNS = {
     "10%": "slip10",
     "15%": "slip15",
 }
-DEFAULT_RPM_CURVE_SLIP = "10%"
+DEFAULT_RPM_CURVE_SLIP = "0%"
 
 
 def _rpm_curve_from_slip_table(slip: str = DEFAULT_RPM_CURVE_SLIP) -> Dict[str, List[Dict[str, float]]]:
