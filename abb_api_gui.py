@@ -39,6 +39,10 @@ except ImportError:
     ImageTk = None
 
 
+class ApiResponseError(RuntimeError):
+    pass
+
+
 def _load_local_defaults() -> Dict[str, str]:
     path = Path(__file__).with_name("abb_gui_defaults.json")
     if not path.exists():
@@ -575,7 +579,13 @@ class LogMixin:
         self.log_queue: queue.Queue[str] = queue.Queue()
 
     def _remember_auth(self, data: Dict[str, str], body: Dict[str, Any]) -> None:
-        self.access_token = body["access_token"]
+        token = body.get("access_token")
+        if not token:
+            raise ValueError("Token response did not include access_token.")
+        self.access_token = str(token)
+        expires_in = int(body.get("expires_in", 0) or 0)
+        expires_at = time.time() + expires_in if expires_in > 0 else 0
+        self.access_token_expires_at = expires_at
         root = self.winfo_toplevel()
         if hasattr(root, "shared_auth"):
             root.shared_auth.update(
@@ -585,7 +595,7 @@ class LogMixin:
                     "scope": data.get("scope", ""),
                     "token_url": self.token_url_var.get().strip(),
                     "access_token": self.access_token,
-                    "expires_at": time.time() + int(body.get("expires_in", 0) or 0),
+                    "expires_at": expires_at,
                 }
             )
 
@@ -604,20 +614,65 @@ class LogMixin:
             if hasattr(self, name) and shared.get(key):
                 getattr(self, name).set(shared[key])
         self.access_token = shared.get("access_token") or self.access_token
+        if shared.get("expires_at"):
+            self.access_token_expires_at = shared["expires_at"]
         self.log("Shared auth copied into this tab.")
 
     def _effective_token(self) -> Optional[str]:
-        if self.access_token:
+        refresh_margin_seconds = 60
+        minimum_valid_until = time.time() + refresh_margin_seconds
+        local_expires_at = float(getattr(self, "access_token_expires_at", 0) or 0)
+        if self.access_token and (not local_expires_at or local_expires_at > minimum_valid_until):
             return self.access_token
         root = self.winfo_toplevel()
         shared = getattr(root, "shared_auth", {})
-        return shared.get("access_token")
+        shared_token = shared.get("access_token")
+        shared_expires_at = float(shared.get("expires_at", 0) or 0)
+        if shared_token and (not shared_expires_at or shared_expires_at > minimum_valid_until):
+            self.access_token = shared_token
+            self.access_token_expires_at = shared_expires_at
+            return shared_token
+        return None
 
     def _require_token(self) -> str:
         token = self._effective_token()
-        if not token:
-            raise RuntimeError("Access token is empty. Click 'Get Token' or 'Use Shared Auth' first.")
-        return token
+        if token:
+            return token
+        return self._request_token_sync("No valid access token in memory. Requesting token automatically...")
+
+    def _auth_data(self) -> Dict[str, str]:
+        data = {
+            "client_id": self.client_id_var.get().strip(),
+            "client_secret": self.client_secret_var.get().strip(),
+            "scope": self.scope_var.get().strip(),
+            "grant_type": "client_credentials",
+        }
+        if not data["client_id"] or not data["client_secret"]:
+            raise ValueError("Client ID and Client Secret are required.")
+        return data
+
+    def _request_token_sync(self, reason: str = "Requesting token...") -> str:
+        data = self._auth_data()
+        self.log(reason)
+        resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
+        self.log(f"Token response HTTP {resp.status_code}")
+        self._log_rate_limit_headers(resp)
+        self._raise_for_token_response(resp)
+        body = resp.json()
+        self._remember_auth(data, body)
+        self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
+        self.log("Token saved in memory.")
+        return self.access_token or ""
+
+    def _request_token_async(self) -> None:
+        def worker() -> None:
+            try:
+                self._request_token_sync()
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+                messagebox.showerror("Token Error", str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def log(self, message: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -630,6 +685,7 @@ class LogMixin:
         self.after(100, self._flush_log_queue)
 
     def _log_response(self, resp: requests.Response) -> None:
+        parsed: Any = None
         try:
             parsed = resp.json()
             self.latest_response_data = parsed
@@ -637,6 +693,81 @@ class LogMixin:
         except Exception:
             text = resp.text
         self.log(text[:50000])
+        if parsed is not None:
+            self._log_api_errors(parsed)
+        if not resp.ok:
+            self.log(f"HTTP error response status: {resp.status_code}")
+
+    def _api_error_messages(self, data: Any) -> List[str]:
+        messages: List[str] = []
+        seen = set()
+
+        def add(message: str) -> None:
+            text = " ".join(str(message).split())
+            if text and text not in seen:
+                seen.add(text)
+                messages.append(text)
+
+        def format_error(obj: Dict[str, Any]) -> str:
+            parts = []
+            for key in ("status", "title", "error", "errorDescription", "detail", "message"):
+                value = obj.get(key)
+                if value not in (None, ""):
+                    parts.append(f"{key}={value}")
+            return "; ".join(parts) or json.dumps(obj, ensure_ascii=False)[:1000]
+
+        def visit(obj: Any) -> None:
+            if isinstance(obj, dict):
+                errors = obj.get("errors")
+                if isinstance(errors, list):
+                    for item in errors:
+                        if isinstance(item, dict):
+                            add(format_error(item))
+                        else:
+                            add(str(item))
+                elif isinstance(errors, dict):
+                    add(format_error(errors))
+                status_value = obj.get("status")
+                if str(status_value).lower() == "failed":
+                    add(format_error(obj))
+                if "error" in obj or "errorDescription" in obj:
+                    add(format_error(obj))
+                for key, value in obj.items():
+                    if key != "errors":
+                        visit(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+
+        visit(data)
+        return messages
+
+    def _log_api_errors(self, data: Any, context: str = "API response") -> List[str]:
+        messages = self._api_error_messages(data)
+        for index, message in enumerate(messages[:20], start=1):
+            self.log(f"{context} error {index}: {message}")
+        if len(messages) > 20:
+            self.log(f"{context} has {len(messages) - 20} more errors.")
+        return messages
+
+    def _raise_for_api_errors(self, data: Any, context: str = "API response") -> None:
+        messages = self._log_api_errors(data, context)
+        if messages:
+            raise ApiResponseError(f"{context} contained errors: {messages[0]}")
+
+    def _raise_for_http_response(self, resp: requests.Response, context: str = "HTTP response") -> None:
+        if resp.ok:
+            return
+        content_type = resp.headers.get("Content-Type", "")
+        self.log(f"{context} error Content-Type: {content_type or 'unknown'}")
+        try:
+            parsed = resp.json()
+            self.log(json.dumps(parsed, indent=2)[:20000])
+            self._log_api_errors(parsed, context)
+        except Exception:
+            body = resp.text.strip()
+            self.log(body[:20000] if body else "<empty response body>")
+        resp.raise_for_status()
 
     def _log_rate_limit_headers(self, resp: requests.Response) -> None:
         rate_headers = {
@@ -1157,12 +1288,18 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 self.log(f"[{index}/{total}] Requesting {endpoint_name} from {source_path.name} -> {output_name}{retry_text}")
                 response_data = self._send_ws_request_sync(endpoint_name, payload)
                 self._write_batch_json(websocket_path, response_data)
+                self._raise_for_api_errors(response_data, f"{endpoint_name} WebSocket response")
                 route_data = self._download_route_response(response_data) or response_data
                 self._write_batch_json(response_path, route_data)
+                self._raise_for_api_errors(route_data, f"{endpoint_name} route response")
                 self.log(f"Saved JSON: {output_path.with_suffix('.request.json').name}, {websocket_path.name}, {response_path.name}")
                 if self._save_optimal_batch_route(output_path, route_data, rpm_sog_profile):
                     return
                 return
+            except ApiResponseError:
+                self.batch_stop_event.set()
+                self.log("Continuous RTZ batch stopped because the API response contained errors.")
+                raise
             except Exception as exc:
                 if not self._is_connection_reset_10054(exc) or attempt >= OPTIMAL_BATCH_RETRY_ATTEMPTS:
                     raise
@@ -1280,6 +1417,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
 
         if route_data is None:
             return False
+
+        self._raise_for_api_errors(route_data, "Existing batch response")
 
         route_points = self._extract_route_points_for_rtz(route_data)
         if len(route_points) < 2:
@@ -1462,8 +1601,10 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         self.log(f"Downloading route response: {url}")
         resp = requests.get(url, timeout=120)
         self.log(f"Route download HTTP {resp.status_code}")
-        resp.raise_for_status()
-        return resp.json()
+        self._raise_for_http_response(resp, "Route download")
+        parsed = resp.json()
+        self._raise_for_api_errors(parsed, "Route download response")
+        return parsed
 
     def _find_download_urls(self, data: Any) -> List[str]:
         urls: List[str] = []
@@ -1624,29 +1765,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             raise ValueError(f"Invalid JSON: {exc}") from exc
 
     def get_token(self) -> None:
-        def worker() -> None:
-            try:
-                data = {
-                    "client_id": self.client_id_var.get().strip(),
-                    "client_secret": self.client_secret_var.get().strip(),
-                    "scope": self.scope_var.get().strip(),
-                    "grant_type": "client_credentials",
-                }
-                if not data["client_id"] or not data["client_secret"]:
-                    raise ValueError("Client ID and Client Secret are required.")
-                self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
-                self.log(f"Token response HTTP {resp.status_code}")
-                self._raise_for_token_response(resp)
-                body = resp.json()
-                self._remember_auth(data, body)
-                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
-                self.log("Token saved in memory.")
-            except Exception as exc:
-                self.log(f"ERROR: {exc}")
-                messagebox.showerror("Token Error", str(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._request_token_async()
 
     def call_rest_get(self) -> None:
         def worker() -> None:
@@ -1708,6 +1827,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                             "latestMessage": parsed,
                         }
                         self.log(json.dumps(parsed, indent=2)[:20000])
+                        self._log_api_errors(parsed, "WebSocket response")
                         status = str(parsed.get("status", "")).lower()
                         if status in {"finished", "failed", "success", "completed"}:
                             break
@@ -2388,30 +2508,7 @@ class VoyageConfigurationFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Save JSON", command=self.save_json_preset).pack(side=tk.LEFT, padx=5)
 
     def get_token(self) -> None:
-        def worker() -> None:
-            try:
-                data = {
-                    "client_id": self.client_id_var.get().strip(),
-                    "client_secret": self.client_secret_var.get().strip(),
-                    "scope": self.scope_var.get().strip(),
-                    "grant_type": "client_credentials",
-                }
-                if not data["client_id"] or not data["client_secret"]:
-                    raise ValueError("Client ID and Client Secret are required.")
-                self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
-                self.log(f"Token response HTTP {resp.status_code}")
-                self._log_rate_limit_headers(resp)
-                self._raise_for_token_response(resp)
-                body = resp.json()
-                self._remember_auth(data, body)
-                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
-                self.log("Token saved in memory.")
-            except Exception as exc:
-                self.log(f"ERROR: {exc}")
-                messagebox.showerror("Token Error", str(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._request_token_async()
 
     def send_request(self) -> None:
         def worker() -> None:
@@ -2604,29 +2701,7 @@ class ProductApiFrame(ttk.Frame, LogMixin):
         self.load_sample()
 
     def get_token(self) -> None:
-        def worker() -> None:
-            try:
-                data = {
-                    "client_id": self.client_id_var.get().strip(),
-                    "client_secret": self.client_secret_var.get().strip(),
-                    "scope": self.scope_var.get().strip(),
-                    "grant_type": "client_credentials",
-                }
-                if not data["client_id"] or not data["client_secret"]:
-                    raise ValueError("Client ID and Client Secret are required.")
-                self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
-                self.log(f"Token response HTTP {resp.status_code}")
-                self._raise_for_token_response(resp)
-                body = resp.json()
-                self._remember_auth(data, body)
-                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
-                self.log("Token saved in memory.")
-            except Exception as exc:
-                self.log(f"ERROR: {exc}")
-                messagebox.showerror("Token Error", str(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._request_token_async()
 
     def send_request(self) -> None:
         def worker() -> None:
@@ -2799,29 +2874,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         ttk.Button(bottom, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
 
     def get_token(self) -> None:
-        def worker() -> None:
-            try:
-                data = {
-                    "client_id": self.client_id_var.get().strip(),
-                    "client_secret": self.client_secret_var.get().strip(),
-                    "scope": self.scope_var.get().strip(),
-                    "grant_type": "client_credentials",
-                }
-                if not data["client_id"] or not data["client_secret"]:
-                    raise ValueError("Client ID and Client Secret are required.")
-                self.log("Requesting token...")
-                resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
-                self.log(f"Token response HTTP {resp.status_code}")
-                self._raise_for_token_response(resp)
-                body = resp.json()
-                self._remember_auth(data, body)
-                self.log(json.dumps({k: v for k, v in body.items() if k != "access_token"}, indent=2))
-                self.log("Token saved in memory.")
-            except Exception as exc:
-                self.log(f"ERROR: {exc}")
-                messagebox.showerror("Token Error", str(exc))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._request_token_async()
 
     def health_check(self) -> None:
         def worker() -> None:
@@ -2862,6 +2915,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
                                 "latestMessage": parsed,
                             }
                             self.log(json.dumps(parsed, indent=2)[:50000])
+                            self._log_api_errors(parsed, "WebSocket response")
                         except json.JSONDecodeError:
                             self.log(str(msg)[:50000])
                 except Exception as exc:
@@ -2884,19 +2938,7 @@ class NotificationApiFrame(ttk.Frame, LogMixin):
         threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_token_sync(self) -> None:
-        data = {
-            "client_id": self.client_id_var.get().strip(),
-            "client_secret": self.client_secret_var.get().strip(),
-            "scope": self.scope_var.get().strip(),
-            "grant_type": "client_credentials",
-        }
-        if not data["client_id"] or not data["client_secret"]:
-            return
-        resp = requests.post(self.token_url_var.get().strip(), data=data, headers=self._token_headers(), timeout=30)
-        self.log(f"Token refresh HTTP {resp.status_code}")
-        self._raise_for_token_response(resp)
-        body = resp.json()
-        self._remember_auth(data, body)
+        self._request_token_sync("Refreshing token...")
 
     def disconnect_ws(self) -> None:
         self.stop_ws.set()
