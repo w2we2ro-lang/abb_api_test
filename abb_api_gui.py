@@ -1287,6 +1287,11 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             planned_points, planned_schedule = self._parse_rtz(planned_path)
             if len(planned_points) < 2:
                 raise ValueError("Planned RTZ must contain at least two waypoints.")
+            planned_eta = planned_schedule.get("eta")
+            if endpoint_name == "Fixed ETA" and not planned_eta:
+                raise ValueError("Planned RTZ does not contain ETA. Fixed ETA batch requires the planned route ETA.")
+            if planned_eta:
+                self.log(f"Batch planned route ETA: {planned_eta}")
 
             optimal_files = self._optimal_rtz_files(optimal_dir)
             rpm_sog_files = list(optimal_files)
@@ -1315,6 +1320,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 if len(remaining_points) < 2:
                     raise ValueError(f"Could not build at least two waypoints for: {optimal_path}")
                 schedule = dict(optimal_schedule)
+                if planned_eta:
+                    schedule["eta"] = planned_eta
                 metadata = self._rtz_file_metadata(optimal_path)
                 if metadata.get("timestamp_iso"):
                     schedule["etd"] = metadata["timestamp_iso"]
@@ -1346,10 +1353,8 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                 payload["id"] = f"abb-{self._batch_endpoint_slug(endpoint_name)}-{metadata.get('timestamp_label') or index}"
                 if metadata.get("timestamp_iso"):
                     payload["etd"] = metadata["timestamp_iso"]
-                    if endpoint_name == "Fixed ETA":
-                        etd = _parse_utc(metadata["timestamp_iso"])
-                        if etd:
-                            payload["eta"] = _utc_z(etd + timedelta(days=FIXED_ETA_DURATION_DAYS))
+                if endpoint_name == "Fixed ETA" and planned_eta:
+                    payload["eta"] = planned_eta
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
                 payload = self._minimal_batch_payload(payload, endpoint_name, optimization_type)
