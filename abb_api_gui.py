@@ -266,6 +266,7 @@ RPM_CURVE_SLIP_COLUMNS = {
     "10%": "slip10",
     "15%": "slip15",
 }
+RPM_CURVE_SLIP_OPTIONS = list(RPM_CURVE_SLIP_COLUMNS.keys())
 DEFAULT_RPM_CURVE_SLIP = "0%"
 
 
@@ -1001,6 +1002,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         self.batch_output_dir_var = tk.StringVar(value=str(DEFAULT_CONTINUOUS_OUTPUT_DIR))
         self.batch_endpoint_var = tk.StringVar(value="Optimal set speed")
         self.batch_optimization_type_var = tk.StringVar(value="Fuel")
+        self.batch_rpm_slip_var = tk.StringVar(value=DEFAULT_RPM_CURVE_SLIP)
         self.batch_limit_var = tk.StringVar(value="0")
         ttk.Label(batch_frame, text="Planned RTZ").grid(row=0, column=0, sticky="w", padx=5, pady=3)
         ttk.Entry(batch_frame, textvariable=self.batch_planned_path_var).grid(row=0, column=1, sticky="we", padx=5, pady=3)
@@ -1030,10 +1032,18 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             width=18,
         )
         self.batch_optimization_box.grid(row=4, column=1, sticky="w", padx=5, pady=3)
-        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=5, column=0, sticky="w", padx=5, pady=3)
-        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=5, column=1, sticky="w", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Start Batch", command=self.start_continuous_optimal_batch).grid(row=5, column=1, sticky="e", padx=5, pady=3)
-        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=5, column=2, padx=5, pady=3)
+        ttk.Label(batch_frame, text="RPM slip").grid(row=5, column=0, sticky="w", padx=5, pady=3)
+        ttk.Combobox(
+            batch_frame,
+            textvariable=self.batch_rpm_slip_var,
+            values=RPM_CURVE_SLIP_OPTIONS,
+            state="readonly",
+            width=10,
+        ).grid(row=5, column=1, sticky="w", padx=5, pady=3)
+        ttk.Label(batch_frame, text="Max files (0 = all)").grid(row=6, column=0, sticky="w", padx=5, pady=3)
+        ttk.Spinbox(batch_frame, textvariable=self.batch_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=6, column=1, sticky="w", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Start Batch", command=self.start_continuous_optimal_batch).grid(row=6, column=1, sticky="e", padx=5, pady=3)
+        ttk.Button(batch_frame, text="Stop", command=self.stop_continuous_optimal_batch).grid(row=6, column=2, padx=5, pady=3)
         batch_frame.columnconfigure(1, weight=1)
         self._sync_rtz_optimization_options()
         self._sync_batch_optimization_options()
@@ -1087,6 +1097,20 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
     def _sync_batch_optimization_options(self) -> None:
         endpoint_name = self.batch_endpoint_var.get().strip()
         self._sync_optimization_box(self.batch_optimization_box, self.batch_optimization_type_var, endpoint_name)
+
+    def _selected_batch_rpm_slip(self) -> str:
+        value = self.batch_rpm_slip_var.get().strip()
+        if value not in RPM_CURVE_SLIP_COLUMNS:
+            value = DEFAULT_RPM_CURVE_SLIP
+            self.batch_rpm_slip_var.set(value)
+        return value
+
+    def _batch_vessel_parameters(self, rpm_slip: str) -> Dict[str, Any]:
+        if rpm_slip not in RPM_CURVE_SLIP_COLUMNS:
+            rpm_slip = DEFAULT_RPM_CURVE_SLIP
+        vessel_parameters = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
+        vessel_parameters["rpmCurve"] = _rpm_curve_from_slip_table(rpm_slip)
+        return vessel_parameters
 
     def load_async_sample(self) -> None:
         sample = _build_vessel_async_sample(self.async_endpoint_var.get())
@@ -1280,6 +1304,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             if endpoint_name not in VESSEL_ASYNC_ENDPOINTS:
                 raise ValueError(f"Unsupported batch request type: {endpoint_name}")
             optimization_type = self._selected_optimization_type(endpoint_name, self.batch_optimization_type_var)
+            rpm_slip = self._selected_batch_rpm_slip()
             planned_path = Path(self.batch_planned_path_var.get().strip())
             optimal_dir = Path(self.batch_optimal_dir_var.get().strip())
             output_dir = Path(self.batch_output_dir_var.get().strip())
@@ -1339,6 +1364,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             )
             if optimization_type:
                 self.log(f"Batch optimization type: {optimization_type}")
+            self.log(f"Batch RPM curve slip: {rpm_slip}")
             for index, entry in enumerate(entries, start=1):
                 if self.batch_stop_event.is_set():
                     self.log("Continuous RTZ batch stopped.")
@@ -1362,7 +1388,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
                     payload["eta"] = planned_eta
                 if entry["schedule"].get("weatherSource"):
                     payload["weatherSource"] = entry["schedule"]["weatherSource"]
-                payload = self._minimal_batch_payload(payload, endpoint_name, optimization_type)
+                payload = self._minimal_batch_payload(payload, endpoint_name, optimization_type, rpm_slip)
 
                 self._write_batch_json(request_path, payload)
                 self._run_optimal_batch_request_with_retries(
@@ -1506,6 +1532,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
         payload: Dict[str, Any],
         endpoint_name: str,
         optimization_type: Optional[str] = None,
+        rpm_slip: str = DEFAULT_RPM_CURVE_SLIP,
     ) -> Dict[str, Any]:
         minimal: Dict[str, Any] = {}
         if endpoint_name == "Shortest path" and "type" in payload:
@@ -1530,7 +1557,7 @@ class VesselRoutingFrame(ttk.Frame, LogMixin):
             minimal["speed"] = BATCH_INSTRUCTED_SPEED
         elif endpoint_name in BATCH_SPEED_RANGE_ENDPOINTS:
             minimal["speeds"] = [dict(OPTIMAL_BATCH_SPEED_RANGE)]
-        minimal["vesselParameters"] = json.loads(json.dumps(OPTIMAL_BATCH_VESSEL_PARAMETERS))
+        minimal["vesselParameters"] = self._batch_vessel_parameters(rpm_slip)
         value = optimization_type or payload.get("optimizationType") or DEFAULT_OPTIMIZATION_BY_ENDPOINT.get(endpoint_name, "Fuel")
         allowed_values = self._optimization_options_for_endpoint(endpoint_name)
         if value not in allowed_values:
