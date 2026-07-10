@@ -2205,6 +2205,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         super().__init__(master, padding=10)
         self.speed_intervals: List[Dict[str, Any]] = []
         self.rpm_intervals: List[Dict[str, Any]] = []
+        self.time_profile_rows: List[Dict[str, Any]] = []
         self.profile_series: List[Dict[str, Any]] = []
         self.profile_worker_running = False
         self.auto_profile_refresh_active = False
@@ -2230,7 +2231,10 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         ttk.Label(controls, text="Max files (0 = all)").grid(row=3, column=0, sticky="w", padx=5, pady=5)
         ttk.Spinbox(controls, textvariable=self.profile_limit_var, from_=0, to=10000, increment=1, width=10).grid(row=3, column=1, sticky="w", padx=5, pady=5)
         ttk.Button(controls, text="Generate Profiles", command=self.generate_profiles).grid(row=3, column=1, sticky="e", padx=5, pady=5)
-        ttk.Button(controls, text="Save CSV", command=self.save_profiles_csv).grid(row=3, column=2, padx=5, pady=5)
+        export_buttons = ttk.Frame(controls)
+        export_buttons.grid(row=3, column=2, padx=5, pady=5)
+        ttk.Button(export_buttons, text="Save Time CSV", command=self.save_time_profiles_csv).pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(export_buttons, text="Save Detail CSV", command=self.save_profiles_csv).pack(fill=tk.X)
         controls.columnconfigure(1, weight=1)
 
         charts = ttk.PanedWindow(self, orient=tk.VERTICAL)
@@ -2383,17 +2387,17 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
                         speed_intervals.extend(speed_items)
                         rpm_intervals.extend(rpm_items)
 
-                    profile_series.append(
-                        {
-                            "label": label,
-                            "folder": str(folder),
-                            "kind": kind,
-                            "color": color,
-                            "records": records,
-                            "speed_intervals": speed_intervals,
-                            "rpm_intervals": rpm_intervals,
-                        }
-                    )
+                    series = {
+                        "label": label,
+                        "folder": str(folder),
+                        "kind": kind,
+                        "color": color,
+                        "records": records,
+                        "speed_intervals": speed_intervals,
+                        "rpm_intervals": rpm_intervals,
+                    }
+                    series["time_rows"] = self._profile_time_rows(series)
+                    profile_series.append(series)
 
             if not profile_series:
                 raise ValueError("No usable result RTZ folders found.")
@@ -2425,6 +2429,7 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         self.profile_series = profile_series
         self.speed_intervals = [item for series in profile_series for item in series["speed_intervals"]]
         self.rpm_intervals = [item for series in profile_series for item in series["rpm_intervals"]]
+        self.time_profile_rows = [item for series in profile_series for item in series.get("time_rows", [])]
         self.speed_canvas.set_series(
             [
                 {"label": series["label"], "color": series["color"], "intervals": series["speed_intervals"]}
@@ -2440,12 +2445,14 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         total_records = sum(len(series["records"]) for series in profile_series)
         self.log(
             f"Generated profiles from {len(profile_series)} result series and {total_records} RTZ files: "
-            f"{len(self.speed_intervals)} speed intervals, {len(self.rpm_intervals)} rpm intervals."
+            f"{len(self.speed_intervals)} speed intervals, {len(self.rpm_intervals)} rpm intervals, "
+            f"{len(self.time_profile_rows)} time rows."
         )
         for series in profile_series:
             self.log(
                 f"{series['label']}: {len(series['records'])} files, "
-                f"{len(series['speed_intervals'])} speed intervals, {len(series['rpm_intervals'])} rpm intervals."
+                f"{len(series['speed_intervals'])} speed intervals, {len(series['rpm_intervals'])} rpm intervals, "
+                f"{len(series.get('time_rows', []))} time rows."
             )
         if self.speed_intervals:
             speeds = [float(item["value"]) for item in self.speed_intervals]
@@ -2453,6 +2460,111 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
         if self.rpm_intervals:
             rpms = [float(item["value"]) for item in self.rpm_intervals]
             self.log(f"RPM min/avg/max: {min(rpms):.2f}/{sum(rpms) / len(rpms):.2f}/{max(rpms):.2f}")
+
+    def _profile_time_rows(self, series: Dict[str, Any]) -> List[Dict[str, Any]]:
+        speed_intervals = sorted(series.get("speed_intervals", []), key=lambda item: item["start"])
+        rpm_intervals = sorted(series.get("rpm_intervals", []), key=lambda item: item["start"])
+        boundaries = set()
+        for item in speed_intervals + rpm_intervals:
+            if isinstance(item.get("start"), datetime) and isinstance(item.get("end"), datetime) and item["end"] > item["start"]:
+                boundaries.add(item["start"])
+                boundaries.add(item["end"])
+        times = sorted(boundaries)
+        rows: List[Dict[str, Any]] = []
+        for index in range(len(times) - 1):
+            start = times[index]
+            end = times[index + 1]
+            if end <= start:
+                continue
+            midpoint = start + (end - start) / 2
+            speed_item = self._profile_interval_at(speed_intervals, midpoint)
+            rpm_item = self._profile_interval_at(rpm_intervals, midpoint)
+            if speed_item is None and rpm_item is None:
+                continue
+            rows.append(
+                {
+                    "series": series.get("label", ""),
+                    "kind": series.get("kind", ""),
+                    "folder": series.get("folder", ""),
+                    "start": start,
+                    "end": end,
+                    "speed": speed_item.get("value") if speed_item else None,
+                    "rpm": rpm_item.get("value") if rpm_item else None,
+                    "speed_source": speed_item.get("source", "") if speed_item else "",
+                    "rpm_source": rpm_item.get("source", "") if rpm_item else "",
+                    "speed_leg_index": speed_item.get("leg_index", "") if speed_item else "",
+                    "rpm_leg_index": rpm_item.get("leg_index", "") if rpm_item else "",
+                    "speed_distance_nm": speed_item.get("distance_nm") if speed_item else None,
+                    "rpm_distance_nm": rpm_item.get("distance_nm") if rpm_item else None,
+                }
+            )
+        return rows
+
+    def _profile_interval_at(self, intervals: List[Dict[str, Any]], moment: datetime) -> Optional[Dict[str, Any]]:
+        for item in intervals:
+            if item["start"] <= moment <= item["end"]:
+                return item
+        return None
+
+    def save_time_profiles_csv(self) -> None:
+        if not self.time_profile_rows:
+            messagebox.showinfo("Result Preview", "Generate profiles before saving time CSV.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Time Profile CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        rows = sorted(
+            self.time_profile_rows,
+            key=lambda item: (
+                str(item.get("series", "")),
+                item.get("start", datetime.min.replace(tzinfo=timezone.utc)),
+                item.get("end", datetime.min.replace(tzinfo=timezone.utc)),
+            ),
+        )
+        with open(path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "series",
+                    "kind",
+                    "folder",
+                    "start_utc",
+                    "end_utc",
+                    "duration_seconds",
+                    "speed_kn",
+                    "rpm",
+                    "speed_source_file",
+                    "rpm_source_file",
+                    "speed_leg_index",
+                    "rpm_leg_index",
+                    "speed_distance_nm",
+                    "rpm_distance_nm",
+                ]
+            )
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.get("series", ""),
+                        row.get("kind", ""),
+                        row.get("folder", ""),
+                        _utc_z(row["start"]),
+                        _utc_z(row["end"]),
+                        self._fmt_float((row["end"] - row["start"]).total_seconds()),
+                        self._fmt_optional_float(row.get("speed")),
+                        self._fmt_optional_float(row.get("rpm")),
+                        row.get("speed_source", ""),
+                        row.get("rpm_source", ""),
+                        row.get("speed_leg_index", ""),
+                        row.get("rpm_leg_index", ""),
+                        self._fmt_optional_float(row.get("speed_distance_nm")),
+                        self._fmt_optional_float(row.get("rpm_distance_nm")),
+                    ]
+                )
+        self.log(f"Time profile CSV saved: {path} ({len(rows)} rows)")
 
     def save_profiles_csv(self) -> None:
         if not self.speed_intervals and not self.rpm_intervals:
@@ -2697,6 +2809,11 @@ class OptimalProfileFrame(ttk.Frame, LogMixin):
 
     def _fmt_float(self, value: float) -> str:
         return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    def _fmt_optional_float(self, value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return self._fmt_float(float(value))
+        return ""
 
 
 class VoyageConfigurationFrame(ttk.Frame, LogMixin):
